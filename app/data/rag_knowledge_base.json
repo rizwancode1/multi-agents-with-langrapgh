@@ -1,0 +1,23 @@
+[
+    {
+      "document_id": "DOC-RET-01",
+      "title": "Return and Refund Policy",
+      "category": "Customer Support",
+      "content": "Customers can return items within 30 days of delivery. Refunds are processed to the original payment method within 5-7 business days. Items marked as clearance or personalized are non-refundable.",
+      "tags": ["returns", "refunds", "policy"]
+    },
+    {
+      "document_id": "DOC-SHP-02",
+      "title": "Shipping Rates and Delivery Timelines",
+      "category": "Logistics",
+      "content": "Standard shipping takes 3-5 business days and costs $5.99 (free on orders over $50). Express shipping takes 1-2 business days and costs $15.00. International shipping delivery times range from 7 to 14 days.",
+      "tags": ["shipping", "delivery", "rates"]
+    },
+    {
+      "document_id": "DOC-SEC-03",
+      "title": "Account Security and Passwords",
+      "category": "Authentication",
+      "content": "Passwords must contain at least 8 characters, including one uppercase letter, one number, and one special character. Multi-Factor Authentication (MFA) can be enabled under Account Settings.",
+      "tags": ["security", "passwords", "mfa"]
+    }
+]
