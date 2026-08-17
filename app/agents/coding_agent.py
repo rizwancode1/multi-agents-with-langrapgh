@@ -1,7 +1,31 @@
 from app.agents.state import AgentState
 from app.config import get_settings
+from langchain_core.prompts import ChatPromptTemplate
 
 settings = get_settings()
+
+
+def _add_route(state: AgentState, action: str) -> list[dict]:
+    route = list(state.get("route", []))
+    route.append({
+        "agent": "coding",
+        "action": action,
+        "timestamp": __import__("time").time(),
+    })
+    return route
+
+
+CODING_PROMPT = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        "You are a coding assistant. Provide clean, production-ready Python code with comments."
+        " Only output code and brief explanations; do not add unrelated content."
+    ),
+    (
+        "user",
+        "Implement the following requirement in Python:\n\n{question}"
+    ),
+])
 
 
 def coding_node(state: AgentState):
@@ -16,20 +40,19 @@ def coding_node(state: AgentState):
         temperature=0,
     )
 
-    generated_code = llm.invoke(
-        f"""
-Implement the following requirement in Python:
-
-{query}
-
-Provide clean, production-ready code with comments.
-"""
-    )
+    try:
+        chain = CODING_PROMPT | llm
+        answer = chain.invoke({"question": query})
+        code_text = answer.content
+    except Exception:
+        code_text = "# Could not generate code at this time."
 
     return {
         "current_agent": "coding",
-        "code_result": generated_code.content,
-        "response": generated_code.content,
+        "code_result": code_text,
+        "response": code_text,
+        "next_agent": "evaluator",
         "visited_agents": state.get("visited_agents", []) + ["coding"],
         "handoff_count": state.get("handoff_count", 0),
+        "route": _add_route(state, "generate_code"),
     }

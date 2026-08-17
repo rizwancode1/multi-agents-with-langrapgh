@@ -23,8 +23,13 @@ class QueryResponse(BaseModel):
 
     query: str
     response: str
-    agent_used: str
+    entry_agent: str
+    final_agent: str
     visited_agents: list[str]
+    route: list[dict]
+    intents: list[str]
+    order_id: str | None
+    retrieved_documents: list[dict]
     citations: list[str] | None = None
     cached: bool = False
     processing_time_ms: float = 0.0

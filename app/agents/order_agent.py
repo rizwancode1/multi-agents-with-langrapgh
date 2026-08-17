@@ -2,8 +2,9 @@ import json
 import re
 from pathlib import Path
 
-from app.agents.state import AgentState
+from app.agents.state import AgentState, AgentName
 from app.config import get_settings
+from langchain_core.prompts import ChatPromptTemplate
 
 settings = get_settings()
 
@@ -35,22 +36,84 @@ def find_order(query: str) -> dict | None:
     return orders[0] if orders else None
 
 
+def _needs_policy_info(query: str) -> bool:
+    q = query.lower()
+    return any(k in q for k in [
+        "policy", "policies", "shipping", "return", "refund",
+        "compare", "comparison", "fee", "cost", "standard",
+        "free shipping", "delivery", "time", "days",
+    ])
+
+
+def _add_route(state: AgentState, action: str) -> list[dict]:
+    route = list(state.get("route", []))
+    route.append({
+        "agent": "order",
+        "action": action,
+        "timestamp": __import__("time").time(),
+    })
+    return route
+
+
+ORDER_PROMPT = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        "You are an order assistant. Return ONLY the order facts provided."
+        " Do not infer item categories, eligibility, or policy conclusions from order data alone."
+    ),
+    (
+        "user",
+        "Question:\n{question}\n\nOrder data:\n{order_data}"
+    ),
+])
+
+
 def order_node(state: AgentState):
     from langchain_openai import ChatOpenAI
 
     query = state["query"]
     order = find_order(query)
 
-    response_text = ""
-    if order:
-        response_text = (
-            f"Order {order['order_id']} for {order['customer']['name']} - "
-            f"Status: {order['status']}, "
-            f"Items: {len(order['items'])}, "
-            f"Total: ${order['payment']['total']}"
-        )
-    else:
-        response_text = "No matching order found."
+    if not order:
+        return {
+            "current_agent": "order",
+            "response": "No matching order found.",
+            "order_data": {},
+            "order_id": None,
+            "visited_agents": state.get("visited_agents", []) + ["order"],
+            "handoff_count": state.get("handoff_count", 0),
+            "route": _add_route(state, "no_order_found"),
+        }
+
+    order_summary = {
+        "order_id": order["order_id"],
+        "customer_name": order["customer"]["name"],
+        "status": order["status"],
+        "order_date": order["order_date"],
+        "items": [
+            {
+                "name": item["name"],
+                "quantity": item["quantity"],
+                "unit_price": item["unit_price"],
+            }
+            for item in order.get("items", [])
+        ],
+        "shipping_address": order.get("shipping_address", {}),
+        "payment": {
+            "subtotal": order["payment"]["subtotal"],
+            "tax": order["payment"]["tax"],
+            "shipping_fee": order["payment"]["shipping_fee"],
+            "total": order["payment"]["total"],
+            "method": order["payment"]["method"],
+        },
+    }
+
+    next_agent: AgentName | None = "evaluator"
+    handoff_reason = "Order data retrieved, ready for evaluation."
+
+    if _needs_policy_info(query):
+        next_agent = "rag"
+        handoff_reason = "Query requires policy/shipping information beyond order data."
 
     llm = ChatOpenAI(
         base_url=settings.openrouter_base_url,
@@ -59,24 +122,24 @@ def order_node(state: AgentState):
         temperature=0,
     )
 
-    summary = llm.invoke(
-        f"""
-You are an order assistant. Summarize the following order information for the user.
-
-User question:
-{query}
-
-Order data:
-{response_text}
-
-Provide a concise, friendly response.
-"""
-    )
+    try:
+        chain = ORDER_PROMPT | llm
+        answer = chain.invoke({
+            "question": query,
+            "order_data": str(order_summary),
+        })
+        response_text = answer.content
+    except Exception:
+        response_text = f"Order {order['order_id']} found. Status: {order['status']}."
 
     return {
         "current_agent": "order",
-        "response": summary.content,
-        "order_data": order or {},
+        "order_data": order_summary,
+        "order_id": order["order_id"],
+        "response": response_text,
+        "next_agent": next_agent,
+        "handoff_reason": handoff_reason,
         "visited_agents": state.get("visited_agents", []) + ["order"],
         "handoff_count": state.get("handoff_count", 0),
+        "route": _add_route(state, f"lookup_order_handoff_to_{next_agent or 'evaluator'}"),
     }

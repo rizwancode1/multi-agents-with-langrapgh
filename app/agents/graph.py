@@ -7,6 +7,7 @@ from app.agents.rag_agent import rag_node
 from app.agents.order_agent import order_node
 from app.agents.coding_agent import coding_node
 from app.agents.review_agent import review_node
+from app.agents.formatter_agent import formatter_node
 from app.agents.evaluator_agent import evaluator_node, evaluator_router
 
 
@@ -52,6 +53,13 @@ def request_handoff(state: AgentState, target: AgentName, reason: str):
     }
 
 
+def agent_router(state: AgentState):
+    next_agent = state.get("next_agent")
+    if next_agent:
+        return next_agent
+    return "evaluator"
+
+
 def initial_router(state: AgentState):
     return state["next_agent"]
 
@@ -64,6 +72,7 @@ def build_graph():
     builder.add_node("order", order_node)
     builder.add_node("coding", coding_node)
     builder.add_node("review", review_node)
+    builder.add_node("formatter", formatter_node)
     builder.add_node("evaluator", evaluator_node)
 
     builder.add_edge(START, "router")
@@ -80,7 +89,7 @@ def build_graph():
 
     builder.add_conditional_edges(
         "rag",
-        lambda state: "evaluator",
+        agent_router,
         {
             "evaluator": "evaluator",
         },
@@ -88,31 +97,43 @@ def build_graph():
 
     builder.add_conditional_edges(
         "order",
-        lambda state: "evaluator",
+        agent_router,
         {
+            "rag": "rag",
             "evaluator": "evaluator",
         },
     )
 
     builder.add_conditional_edges(
         "coding",
-        lambda state: "review",
+        agent_router,
         {
             "review": "review",
+            "evaluator": "evaluator",
         },
     )
 
-    builder.add_edge("review", "evaluator")
+    builder.add_conditional_edges(
+        "review",
+        agent_router,
+        {
+            "coding": "coding",
+            "evaluator": "evaluator",
+        },
+    )
+
+    builder.add_edge("formatter", END)
 
     builder.add_conditional_edges(
         "evaluator",
         evaluator_router,
         {
-            "end": END,
+            "formatter": "formatter",
             "rag": "rag",
             "order": "order",
             "coding": "coding",
             "review": "review",
+            "end": END,
         },
     )
 
