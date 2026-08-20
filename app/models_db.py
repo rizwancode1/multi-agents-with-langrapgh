@@ -90,3 +90,31 @@ class RefundRequest(Base):
     requested_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     notes: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+
+
+class Conversation(Base):
+    """Conversation thread record."""
+    __tablename__ = "conversations"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    customer_name: Mapped[str] = mapped_column(String(200), nullable=False, default="Unassigned")
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="Open", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    messages: Mapped[list["ConversationMessage"]] = relationship(back_populates="conversation", cascade="all, delete-orphan")
+
+
+class ConversationMessage(Base):
+    """Message within a conversation."""
+    __tablename__ = "conversation_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    text: Mapped[str] = mapped_column(String(4000), nullable=False)
+    status: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    conversation: Mapped["Conversation"] = relationship(back_populates="messages")

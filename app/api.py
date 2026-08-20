@@ -13,10 +13,11 @@ Wires together:
 import os
 import time
 import uuid
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -29,6 +30,7 @@ from app.models import (
     QueryRequest, QueryResponse,
     HealthResponse, MetricsResponse,
     ErrorResponse,
+    StreamEvent, STATUS_MESSAGES,
 )
 from app.security import SecurityPipeline
 from app.cache import ResponseCache
@@ -36,6 +38,7 @@ from app.monitoring import get_logger, MetricsCollector, RequestTimer
 from app.agents.graph import build_graph
 from app.agents.state import AgentState
 from app.checkpoints import get_checkpointer
+from app.api_conversations import router as conversations_router
 from pathlib import Path
 
 load_dotenv()
@@ -114,6 +117,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.state.limiter = limiter
+app.include_router(conversations_router)
 
 # Mount static files
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
@@ -320,6 +324,183 @@ async def query_agents(request: Request, body: QueryRequest):
         cached=False,
         processing_time_ms=round(timer.elapsed_ms, 2),
         security_notes=security_notes,
+    )
+
+
+@app.post("/query/stream")
+@limiter.limit(get_settings().rate_limit)
+@traceable(name="query_stream_endpoint")
+async def stream_query(request: Request, body: QueryRequest):
+    """
+    Streaming multi-agent query endpoint via SSE.
+
+    Yields real-time status events as the LangGraph workflow executes.
+    """
+    # ---- Security + Cache Lookup ----
+    is_allowed, cleaned_message, notes = security.check_input(body.query)
+    if not is_allowed:
+        metrics.record_request(latency_ms=0, error=True)
+        raise HTTPException(
+            status_code=400,
+            detail="Your message was blocked by our security filters.",
+        )
+
+    cached_response = cache.get(cleaned_message)
+    if cached_response is not None:
+        metrics.record_request(latency_ms=0, cache_hit=True)
+        event = StreamEvent(type="done", response=cached_response, cached=True)
+        headers = {
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+        return StreamingResponse(
+            iter([f"data: {event.model_dump_json()}\n\n"]),
+            media_type="text/event-stream",
+            headers=headers,
+        )
+
+    thread_id = body.thread_id or str(uuid.uuid4())
+    graph_config = {
+        "configurable": {
+            "thread_id": thread_id,
+        }
+    }
+
+    initial_state: AgentState = {
+        "query": cleaned_message,
+        "next_agent": None,
+        "visited_agents": [],
+        "handoff_count": 0,
+        "route": [],
+    }
+
+    start_time = time.monotonic()
+    HEARTBEAT_INTERVAL = 15.0
+    SSE_HEADERS = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+
+    async def _run_graph_to_queue(queue: asyncio.Queue):
+        final_output = None
+        try:
+            async for event in multi_agent_graph.astream_events(
+                initial_state, config=graph_config, version="v2"
+            ):
+                if await request.is_disconnected():
+                    break
+                await queue.put(event)
+                if event.get("name") == "formatter" and event.get("type") == "on_node_end":
+                    final_output = event.get("data", {}).get("output", {})
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            await queue.put({"type": "error", "message": str(e)})
+        finally:
+            await asyncio.shield(queue.put({"__final__": True, "data": final_output}))
+            await asyncio.shield(queue.put(None))
+
+    async def _convert_and_yield(event: dict):
+        event_type = event.get("type", "")
+        name = event.get("name", "")
+
+        if event_type in ("on_node_start", "on_chain_start"):
+            status_msg = STATUS_MESSAGES.get(name, f"Running {name}...")
+            return StreamEvent(type="status", agent=name, message=status_msg)
+        elif event_type in ("on_node_end", "on_chain_end"):
+            return StreamEvent(type="step", agent=name, data=event.get("data", {}))
+        elif event_type in ("on_node_error", "on_chain_error"):
+            err_msg = str(event.get("data", {}).get("error", "Unknown error"))
+            return StreamEvent(type="error", message=err_msg)
+        return None
+
+    async def event_generator():
+        queue: asyncio.Queue = asyncio.Queue()
+        task = asyncio.create_task(_run_graph_to_queue(queue))
+        last_heartbeat = time.monotonic()
+        final_output = None
+
+        try:
+            while True:
+                if await request.is_disconnected():
+                    task.cancel()
+                    break
+
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    now = time.monotonic()
+                    if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+                        yield ": ping\n\n"
+                        last_heartbeat = now
+                    continue
+
+                if event is None:
+                    break
+
+                if event.get("__final__"):
+                    final_output = event.get("data")
+                    continue
+
+                last_heartbeat = time.monotonic()
+                converted = await _convert_and_yield(event)
+                if converted is not None:
+                    yield f"data: {converted.model_dump_json()}\n\n"
+
+        finally:
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        if final_output:
+            response_text = final_output.get("response", "")
+            visited = final_output.get("visited_agents", [])
+            entry_agent = visited[0] if visited else "unknown"
+            final_agent = final_output.get("current_agent", "unknown")
+            route_trace = final_output.get("route", [])
+            intents = final_output.get("intents", [])
+            order_id = final_output.get("order_id")
+            retrieved_documents = final_output.get("retrieved_documents", [])
+            citations = final_output.get("citations", [])
+
+            validated_response, _ = security.check_output(response_text)
+            cache.set(cleaned_message, validated_response)
+
+            done_event = StreamEvent(
+                type="done",
+                response=validated_response,
+                data={
+                    "entry_agent": entry_agent,
+                    "final_agent": final_agent,
+                    "visited_agents": visited,
+                    "route": route_trace,
+                    "intents": intents,
+                    "order_id": order_id,
+                    "thread_id": thread_id,
+                    "retrieved_documents": retrieved_documents,
+                    "citations": citations,
+                },
+            )
+            yield f"data: {done_event.model_dump_json()}\n\n"
+
+            input_tokens = int(len(cleaned_message.split()) * 1.3)
+            output_tokens = int(len(validated_response.split()) * 1.3)
+            metrics.record_request(
+                latency_ms=(time.monotonic() - start_time) * 1000,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_hit=False,
+            )
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
     )
 
 

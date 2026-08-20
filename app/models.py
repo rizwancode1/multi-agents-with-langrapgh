@@ -4,6 +4,7 @@ Pydantic models for input validation and response structure.
 """
 
 from pydantic import BaseModel, Field
+from typing import Literal
 from datetime import datetime, timezone
 
 
@@ -16,7 +17,8 @@ class QueryRequest(BaseModel):
         max_length=10000,
         description="The user's query to the multi-agent system",
     )
-    thread_id: str = Field(
+    thread_id: str | None = Field(
+        default=None,
         description="Optional thread ID for checkpointed multi-turn conversations",
     )
 
@@ -69,3 +71,25 @@ class ErrorResponse(BaseModel):
 
     error: str
     detail: str | None = None
+
+
+class StreamEvent(BaseModel):
+    """SSE event payload for streaming agent status."""
+
+    type: Literal["status", "step", "error", "done"]
+    agent: str | None = None
+    message: str | None = None
+    data: dict | None = None
+    response: str | None = None
+    cached: bool = False
+
+
+STATUS_MESSAGES = {
+    "router": "Analyzing request...",
+    "order": "Looking up your order...",
+    "policy_rag": "Searching knowledge base...",
+    "support_ticket": "Drafting support ticket...",
+    "return_refund": "Calculating refund eligibility...",
+    "evaluator": "Validating response...",
+    "formatter": "Finalizing answer...",
+}
