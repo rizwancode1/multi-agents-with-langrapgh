@@ -4,7 +4,7 @@ import re
 from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
 
-from app.agents.state import AgentState, AgentName
+from app.agents.state import AgentState, AgentName, format_history
 from app.config import get_settings
 from app.monitoring import get_logger
 
@@ -68,8 +68,11 @@ ROUTER_PROMPT = ChatPromptTemplate.from_messages([
         "system",
         "You are a support supervisor. Choose the ONE specialized agent that should handle the user's request."
         " Also extract ALL specific user intents and any order ID."
+        "\n\nConversation history is provided. Use it to understand follow-up requests"
+        " (e.g. 'what is the price?' after an order discussion means the ORDER price,"
+        " not a general pricing FAQ). When in doubt, route to the agent from the previous relevant turn."
         "\n\nAvailable agents:"
-        "\n1. order - customer orders, order status, order history, tracking"
+        "\n1. order - customer orders, order status, order history, tracking, order prices"
         "\n2. policy_rag - policies, FAQs, documentation, rules, guidelines"
         "\n3. support_ticket - complaints, issues, support tickets, general help"
         "\n4. return_refund - returns, eligibility, refunds (usually reached via policy_rag)"
@@ -87,7 +90,7 @@ ROUTER_PROMPT = ChatPromptTemplate.from_messages([
     ),
     (
         "user",
-        "{query}"
+        "Conversation history:\n{history}\n\nCurrent user request:\n{query}"
     ),
 ])
 
@@ -96,6 +99,7 @@ def router_node(state: AgentState):
     from langchain_openai import ChatOpenAI
 
     query = state["query"]
+    history = format_history(state.get("messages", []))
 
     llm = ChatOpenAI(
         base_url=settings.openrouter_base_url,
@@ -108,7 +112,7 @@ def router_node(state: AgentState):
 
     try:
         chain = ROUTER_PROMPT | router_llm
-        decision = chain.invoke({"query": query})
+        decision = chain.invoke({"query": query, "history": history})
         agent = decision.agent
         reason = decision.reason
         intents = decision.intents

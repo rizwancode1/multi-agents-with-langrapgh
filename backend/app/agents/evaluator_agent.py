@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 
-from app.agents.state import AgentState, AgentName
+from app.agents.state import AgentState, AgentName, format_history
 from app.config import get_settings
 from app.monitoring import get_logger
 from langchain_core.prompts import ChatPromptTemplate
@@ -65,11 +65,12 @@ EVALUATOR_PROMPT = ChatPromptTemplate.from_messages([
         "\n5. HALLUCINATION: Set hallucination=true if ANY claim is made that is not directly supported by the provided data."
         "\n6. FEEDBACK: If the response is incomplete, provide specific, actionable feedback in 'reason' so the next agent attempt can address the gap."
         "\n7. If the agent has already been retried 2+ times for the same issue, consider passing rather than retrying indefinitely."
+        "\n   - The 'retry_count' reflects how many attempts have been made. If it is 2 or more, prefer passing."
         "\n\nReturn structured evaluation."
     ),
     (
         "user",
-        "User query:\n{query}\n\nDetected intents:\n{intents}\n\nAgent response:\n{response}\n\nHandoff feedback:\n{handoff_reason}\n\nOrder data:\n{order_data}\n\nOrder ID:\n{order_id}\n\nRetrieved documents:\n{retrieved_documents}\n\nReturn/Refund data:\n{return_refund_data}\n\nContext:\n{context}"
+        "Conversation history:\n{history}\n\nUser query:\n{query}\n\nDetected intents:\n{intents}\n\nAgent response:\n{response}\n\nHandoff feedback:\n{handoff_reason}\n\nOrder data:\n{order_data}\n\nOrder ID:\n{order_id}\n\nRetrieved documents:\n{retrieved_documents}\n\nReturn/Refund data:\n{return_refund_data}\n\nContext:\n{context}\n\nRetry count:\n{retry_count}"
     ),
 ])
 
@@ -79,6 +80,7 @@ def evaluator_node(state: AgentState):
 
     query = state.get("query", "")
     intents = state.get("intents") or []
+    history = format_history(state.get("messages", []))
     order_data = state.get("order_data", {})
     order_id = state.get("order_id")
     retrieved_documents = state.get("retrieved_documents", [])
@@ -86,6 +88,7 @@ def evaluator_node(state: AgentState):
     context = state.get("context", [])
     response = state.get("response", "")
     handoff_reason = state.get("handoff_reason", "")
+    retry_count = state.get("handoff_count", 0)
 
     llm = ChatOpenAI(
         base_url=settings.openrouter_base_url,
@@ -100,6 +103,7 @@ def evaluator_node(state: AgentState):
         chain = EVALUATOR_PROMPT | evaluator_llm
         result = chain.invoke({
             "query": query,
+            "history": history,
             "intents": intents,
             "response": response,
             "handoff_reason": handoff_reason,
@@ -108,6 +112,7 @@ def evaluator_node(state: AgentState):
             "retrieved_documents": retrieved_documents,
             "return_refund_data": return_refund_data,
             "context": context,
+            "retry_count": retry_count,
         })
         evaluation = result.model_dump()
         logger.info("evaluator_result", extra={"extra_data": {

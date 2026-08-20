@@ -39,9 +39,58 @@ from app.agents.graph import build_graph
 from app.agents.state import AgentState
 from app.checkpoints import get_checkpointer
 from app.api_conversations import router as conversations_router
+from app.api_conversations import save_conversation_message, get_conversation_thread_id, get_conversation_messages
 from pathlib import Path
 
 load_dotenv()
+
+
+# Graph agent nodes that produce user-facing status updates
+AGENT_NODES = {
+    "router",
+    "policy_rag",
+    "order",
+    "support_ticket",
+    "return_refund",
+    "evaluator",
+    "formatter",
+}
+
+
+def _build_initial_state(body: "QueryRequest", cleaned_message: str, thread_id: str) -> AgentState:
+    """Build the starting graph state for a request.
+
+    Loads persisted conversation history (when a conversation_id is provided) so
+    agents can understand follow-up requests, and resets all transient per-turn
+    data so checkpointed values from a previous turn cannot leak into this one.
+    """
+    history: list[dict] = []
+    if body.conversation_id:
+        history = get_conversation_messages(body.conversation_id)
+        # The current user message is persisted before the graph runs; drop it so
+        # the history shows only PRIOR turns (the current query is passed separately).
+        if history and history[-1]["role"] == "user" and history[-1]["text"] == body.query:
+            history = history[:-1]
+
+    return {
+        "query": cleaned_message,
+        "messages": history,
+        "next_agent": None,
+        "current_agent": None,
+        "visited_agents": [],
+        "handoff_count": 0,
+        "route": [],
+        "response": "",
+        "context": [],
+        "intents": [],
+        "order_data": [],
+        "order_id": None,
+        "citations": [],
+        "retrieved_documents": [],
+        "return_refund_data": None,
+        "evaluation": None,
+        "handoff_reason": None,
+    }
 
 
 # === Global instances (initialized in lifespan) ===
@@ -75,7 +124,7 @@ async def lifespan(app: FastAPI):
     cache = ResponseCache(ttl_seconds=settings.cache_ttl_seconds)
     metrics = MetricsCollector()
 
-    checkpointer = get_checkpointer()
+    checkpointer = await get_checkpointer()
     multi_agent_graph = build_graph(checkpointer=checkpointer)
 
     # Initialize database and seed data
@@ -198,6 +247,10 @@ async def query_agents(request: Request, body: QueryRequest):
                 detail="Your message was blocked by our security filters.",
             )
 
+        # ---- Step 1b: Persist the user message ----
+        if body.conversation_id:
+            save_conversation_message(body.conversation_id, "user", body.query)
+
         # ---- Step 2: Cache Lookup ----
         cached_response = cache.get(cleaned_message)
         if cached_response is not None:
@@ -222,7 +275,10 @@ async def query_agents(request: Request, body: QueryRequest):
             )
 
         # ---- Step 3: Invoke Multi-Agent Graph ----
-        thread_id = body.thread_id or str(uuid.uuid4())
+        if body.conversation_id:
+            thread_id = body.thread_id or get_conversation_thread_id(body.conversation_id) or str(uuid.uuid4())
+        else:
+            thread_id = body.thread_id or str(uuid.uuid4())
         graph_config = {
             "configurable": {
                 "thread_id": thread_id,
@@ -230,13 +286,7 @@ async def query_agents(request: Request, body: QueryRequest):
         }
 
         try:
-            initial_state: AgentState = {
-                "query": cleaned_message,
-                "next_agent": None,
-                "visited_agents": [],
-                "handoff_count": 0,
-                "route": [],
-            }
+            initial_state = _build_initial_state(body, cleaned_message, thread_id)
             result = multi_agent_graph.invoke(initial_state, config=graph_config)
         except Exception as e:
             logger.error(f"Agent invocation failed: {e}", extra={"extra_data": {
@@ -282,6 +332,10 @@ async def query_agents(request: Request, body: QueryRequest):
         # ---- Step 5: Cache Store ----
         cache.set(cleaned_message, validated_response)
 
+        # ---- Step 5b: Persist the assistant message ----
+        if body.conversation_id:
+            save_conversation_message(body.conversation_id, "assistant", validated_response)
+
     # ---- Step 6: Log & Record Metrics ----
     input_tokens = int(len(cleaned_message.split()) * 1.3)
     output_tokens = int(len(validated_response.split()) * 1.3)
@@ -319,6 +373,7 @@ async def query_agents(request: Request, body: QueryRequest):
         intents=intents,
         order_id=order_id,
         thread_id=thread_id,
+        conversation_id=body.conversation_id,
         retrieved_documents=retrieved_documents,
         citations=citations,
         cached=False,
@@ -345,9 +400,15 @@ async def stream_query(request: Request, body: QueryRequest):
             detail="Your message was blocked by our security filters.",
         )
 
+    # ---- Persist the user message ----
+    if body.conversation_id:
+        save_conversation_message(body.conversation_id, "user", body.query)
+
     cached_response = cache.get(cleaned_message)
     if cached_response is not None:
         metrics.record_request(latency_ms=0, cache_hit=True)
+        if body.conversation_id:
+            save_conversation_message(body.conversation_id, "assistant", cached_response)
         event = StreamEvent(type="done", response=cached_response, cached=True)
         headers = {
             "Cache-Control": "no-cache",
@@ -360,22 +421,20 @@ async def stream_query(request: Request, body: QueryRequest):
             headers=headers,
         )
 
-    thread_id = body.thread_id or str(uuid.uuid4())
+    if body.conversation_id:
+        thread_id = body.thread_id or get_conversation_thread_id(body.conversation_id) or str(uuid.uuid4())
+    else:
+        thread_id = body.thread_id or str(uuid.uuid4())
     graph_config = {
         "configurable": {
             "thread_id": thread_id,
         }
     }
 
-    initial_state: AgentState = {
-        "query": cleaned_message,
-        "next_agent": None,
-        "visited_agents": [],
-        "handoff_count": 0,
-        "route": [],
-    }
+    initial_state = _build_initial_state(body, cleaned_message, thread_id)
 
     start_time = time.monotonic()
+    MAX_GRAPH_SECONDS = 180.0
     HEARTBEAT_INTERVAL = 15.0
     SSE_HEADERS = {
         "Cache-Control": "no-cache",
@@ -385,53 +444,90 @@ async def stream_query(request: Request, body: QueryRequest):
 
     async def _run_graph_to_queue(queue: asyncio.Queue):
         final_output = None
+        seen_nodes = set()
         try:
             async for event in multi_agent_graph.astream_events(
                 initial_state, config=graph_config, version="v2"
             ):
-                if await request.is_disconnected():
-                    break
                 await queue.put(event)
-                if event.get("name") == "formatter" and event.get("type") == "on_node_end":
-                    final_output = event.get("data", {}).get("output", {})
+                etype = event.get("event")
+                if etype in ("on_node_end", "on_chain_end"):
+                    node = event.get("name")
+                    seen_nodes.add(f"{etype}:{node}")
+                    output = event.get("data", {}).get("output")
+                    if isinstance(output, dict) and output.get("response"):
+                        if final_output is None:
+                            final_output = dict(output)
+                        else:
+                            merged = dict(final_output)
+                            merged.update({
+                                k: v for k, v in output.items() if v not in (None, [], {})
+                            })
+                            merged["response"] = output["response"]
+                            final_output = merged
+                        logger.info("stream_final_output_captured", extra={"extra_data": {
+                            "event": etype,
+                            "node": node,
+                            "response_length": len(output.get("response", "")),
+                        }})
         except asyncio.CancelledError:
             pass
         except Exception as e:
+            logger.error("stream_graph_error", extra={"extra_data": {
+                "query": cleaned_message[:200],
+                "error": str(e),
+            }})
             await queue.put({"type": "error", "message": str(e)})
         finally:
+            if final_output is None:
+                logger.warning("stream_no_final_output", extra={"extra_data": {
+                    "query": cleaned_message[:200],
+                    "events": list(seen_nodes),
+                }})
             await asyncio.shield(queue.put({"__final__": True, "data": final_output}))
             await asyncio.shield(queue.put(None))
 
     async def _convert_and_yield(event: dict):
-        event_type = event.get("type", "")
+        event_type = event.get("event", "")
         name = event.get("name", "")
 
-        if event_type in ("on_node_start", "on_chain_start"):
+        # LangGraph's astream_events (version="v2") emits on_chain_start/on_chain_end
+        # events (with name == node name) rather than on_node_start/on_node_end.
+        if event_type in ("on_node_start", "on_chain_start") and name in AGENT_NODES:
             status_msg = STATUS_MESSAGES.get(name, f"Running {name}...")
             return StreamEvent(type="status", agent=name, message=status_msg)
-        elif event_type in ("on_node_end", "on_chain_end"):
-            return StreamEvent(type="step", agent=name, data=event.get("data", {}))
+        elif event_type in ("on_node_end", "on_chain_end") and name in AGENT_NODES:
+            return StreamEvent(type="step", agent=name)
         elif event_type in ("on_node_error", "on_chain_error"):
             err_msg = str(event.get("data", {}).get("error", "Unknown error"))
             return StreamEvent(type="error", message=err_msg)
+        elif event_type == "error":
+            return StreamEvent(type="error", message=event.get("message", "Unknown error"))
         return None
 
     async def event_generator():
         queue: asyncio.Queue = asyncio.Queue()
         task = asyncio.create_task(_run_graph_to_queue(queue))
         last_heartbeat = time.monotonic()
+        graph_started = time.monotonic()
         final_output = None
+        terminal_sent = False
 
         try:
             while True:
-                if await request.is_disconnected():
-                    task.cancel()
-                    break
-
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=1.0)
                 except asyncio.TimeoutError:
                     now = time.monotonic()
+                    if now - graph_started >= MAX_GRAPH_SECONDS:
+                        terminal_sent = True
+                        error_event = StreamEvent(
+                            type="error",
+                            message="Request timed out. Please try again.",
+                        )
+                        yield f"data: {error_event.model_dump_json()}\n\n"
+                        task.cancel()
+                        break
                     if now - last_heartbeat >= HEARTBEAT_INTERVAL:
                         yield ": ping\n\n"
                         last_heartbeat = now
@@ -447,6 +543,8 @@ async def stream_query(request: Request, body: QueryRequest):
                 last_heartbeat = time.monotonic()
                 converted = await _convert_and_yield(event)
                 if converted is not None:
+                    if converted.type == "error":
+                        terminal_sent = True
                     yield f"data: {converted.model_dump_json()}\n\n"
 
         finally:
@@ -471,6 +569,9 @@ async def stream_query(request: Request, body: QueryRequest):
             validated_response, _ = security.check_output(response_text)
             cache.set(cleaned_message, validated_response)
 
+            if body.conversation_id:
+                save_conversation_message(body.conversation_id, "assistant", validated_response)
+
             done_event = StreamEvent(
                 type="done",
                 response=validated_response,
@@ -482,11 +583,13 @@ async def stream_query(request: Request, body: QueryRequest):
                     "intents": intents,
                     "order_id": order_id,
                     "thread_id": thread_id,
+                    "conversation_id": body.conversation_id,
                     "retrieved_documents": retrieved_documents,
                     "citations": citations,
                 },
             )
             yield f"data: {done_event.model_dump_json()}\n\n"
+            terminal_sent = True
 
             input_tokens = int(len(cleaned_message.split()) * 1.3)
             output_tokens = int(len(validated_response.split()) * 1.3)
@@ -496,6 +599,12 @@ async def stream_query(request: Request, body: QueryRequest):
                 output_tokens=output_tokens,
                 cache_hit=False,
             )
+        elif not terminal_sent:
+            error_event = StreamEvent(
+                type="error",
+                message="The assistant couldn't complete the request. Please try again.",
+            )
+            yield f"data: {error_event.model_dump_json()}\n\n"
 
     return StreamingResponse(
         event_generator(),

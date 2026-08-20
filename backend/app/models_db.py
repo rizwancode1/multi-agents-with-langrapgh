@@ -97,6 +97,7 @@ class Conversation(Base):
     __tablename__ = "conversations"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    thread_id: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True, index=True)
     title: Mapped[str] = mapped_column(String(300), nullable=False)
     customer_name: Mapped[str] = mapped_column(String(200), nullable=False, default="Unassigned")
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="Open", index=True)

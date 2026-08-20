@@ -29,3 +29,16 @@ class AgentState(TypedDict, total=False):
     error: str | None
     route: list[dict]
     return_refund_data: dict | None
+    messages: list[dict]
+
+
+def format_history(messages: list[dict] | None) -> str:
+    """Render conversation history (list of {role, text}) for agent prompts."""
+    if not messages:
+        return "No prior conversation."
+    lines = []
+    for m in messages:
+        role = "User" if m.get("role") == "user" else "Assistant"
+        text = m.get("text", "")
+        lines.append(f"{role}: {text}")
+    return "\n".join(lines)

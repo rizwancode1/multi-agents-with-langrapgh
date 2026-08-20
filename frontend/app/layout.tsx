@@ -1,6 +1,7 @@
 import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
 import Providers from './Providers'
+import Sidebar from '../components/common/Sidebar'
 import './globals.css'
 
 export const metadata: Metadata = {
@@ -43,7 +44,10 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className="antialiased" suppressHydrationWarning>
         <Providers>
-          {children}
+          <div className="flex min-h-dvh max-h-dvh overflow-x-hidden aurora-shell">
+            <Sidebar />
+            {children}
+          </div>
           {process.env.NODE_ENV === 'production' && <Analytics />}
         </Providers>
       </body>

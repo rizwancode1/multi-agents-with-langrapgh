@@ -43,9 +43,20 @@ def db_session():
 
 
 def init_db():
-    """Create all tables."""
+    """Create all tables and apply lightweight migrations for existing databases."""
     from app.models_db import Base
+    from sqlalchemy import inspect, text
+
     Base.metadata.create_all(bind=engine)
+
+    # Lightweight migration: add conversations.thread_id if missing
+    with engine.connect() as conn:
+        inspector = inspect(engine)
+        if "conversations" in inspector.get_table_names():
+            columns = {col["name"] for col in inspector.get_columns("conversations")}
+            if "thread_id" not in columns:
+                conn.execute(text("ALTER TABLE conversations ADD COLUMN thread_id VARCHAR(100)"))
+                conn.commit()
 
 
 def drop_all_tables():

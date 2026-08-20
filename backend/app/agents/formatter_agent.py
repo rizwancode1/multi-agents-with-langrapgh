@@ -1,4 +1,4 @@
-from app.agents.state import AgentState, AgentName
+from app.agents.state import AgentState, AgentName, format_history
 from app.config import get_settings
 from app.monitoring import get_logger
 from langchain_core.prompts import ChatPromptTemplate
@@ -28,7 +28,7 @@ FORMATTER_PROMPT = ChatPromptTemplate.from_messages([
     ),
     (
         "user",
-        "User question:\n{question}\n\nOrder data:\n{order_data}\n\nReturn/Refund data:\n{return_refund_data}\n\nRetrieved context:\n{context}"
+        "Conversation history:\n{history}\n\nUser question:\n{question}\n\nOrder data:\n{order_data}\n\nReturn/Refund data:\n{return_refund_data}\n\nRetrieved context:\n{context}"
     ),
 ])
 
@@ -37,6 +37,7 @@ def formatter_node(state: AgentState):
     from langchain_openai import ChatOpenAI
 
     query = state["query"]
+    history = format_history(state.get("messages", []))
     order_data = state.get("order_data", {})
     return_refund_data = state.get("return_refund_data", {})
     context = state.get("context", [])
@@ -63,6 +64,7 @@ def formatter_node(state: AgentState):
         chain = FORMATTER_PROMPT | llm
         formatted = chain.invoke({
             "question": query,
+            "history": history,
             "order_data": str(order_data) if order_data else "No order data available.",
             "return_refund_data": str(return_refund_data) if return_refund_data else "No return/refund data available.",
             "context": "\n".join(f"[{i}] {c}" for i, c in enumerate(context, 1)) if context else "No retrieved context available.",

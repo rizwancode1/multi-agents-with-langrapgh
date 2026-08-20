@@ -21,6 +21,10 @@ class QueryRequest(BaseModel):
         default=None,
         description="Optional thread ID for checkpointed multi-turn conversations",
     )
+    conversation_id: int | None = Field(
+        default=None,
+        description="Optional conversation ID for persisting messages to a conversation thread",
+    )
 
 
 class QueryResponse(BaseModel):
@@ -35,6 +39,7 @@ class QueryResponse(BaseModel):
     intents: list[str]
     order_id: str | None
     thread_id: str
+    conversation_id: int | None = None
     retrieved_documents: list[dict]
     citations: list[str] | None = None
     cached: bool = False
