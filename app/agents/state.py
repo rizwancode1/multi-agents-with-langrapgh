@@ -2,11 +2,12 @@ from typing import TypedDict, Literal, Optional
 
 AgentName = Literal[
     "router",
-    "rag",
+    "policy_rag",
     "order",
-    "coding",
-    "review",
+    "support_ticket",
+    "return_refund",
     "evaluator",
+    "formatter",
 ]
 
 
@@ -16,11 +17,15 @@ class AgentState(TypedDict, total=False):
     response: str
     context: list[str]
     order_data: dict
-    code_result: str
+    order_id: str | None
     citations: list[str]
+    intents: list[str]
+    retrieved_documents: list[dict]
     next_agent: AgentName | None
     handoff_reason: str | None
     evaluation: dict
     handoff_count: int
     visited_agents: list[str]
     error: str | None
+    route: list[dict]
+    return_refund_data: dict | None

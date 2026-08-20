@@ -16,6 +16,9 @@ class QueryRequest(BaseModel):
         max_length=10000,
         description="The user's query to the multi-agent system",
     )
+    thread_id: str = Field(
+        description="Optional thread ID for checkpointed multi-turn conversations",
+    )
 
 
 class QueryResponse(BaseModel):
@@ -23,8 +26,14 @@ class QueryResponse(BaseModel):
 
     query: str
     response: str
-    agent_used: str
+    entry_agent: str
+    final_agent: str
     visited_agents: list[str]
+    route: list[dict]
+    intents: list[str]
+    order_id: str | None
+    thread_id: str
+    retrieved_documents: list[dict]
     citations: list[str] | None = None
     cached: bool = False
     processing_time_ms: float = 0.0

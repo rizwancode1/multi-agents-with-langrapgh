@@ -12,10 +12,12 @@ Wires together:
 
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -31,8 +33,9 @@ from app.models import (
 from app.security import SecurityPipeline
 from app.cache import ResponseCache
 from app.monitoring import get_logger, MetricsCollector, RequestTimer
-from app.agents.graph import graph
+from app.agents.graph import build_graph
 from app.agents.state import AgentState
+from app.checkpoints import get_checkpointer
 from pathlib import Path
 
 load_dotenv()
@@ -68,17 +71,30 @@ async def lifespan(app: FastAPI):
     security = SecurityPipeline()
     cache = ResponseCache(ttl_seconds=settings.cache_ttl_seconds)
     metrics = MetricsCollector()
-    multi_agent_graph = graph
 
-    output_path = Path.cwd() / "rag_agent_graph.png"
-    
-    output_path.write_bytes(
-        multi_agent_graph.get_graph().draw_mermaid_png()
-    )
+    checkpointer = get_checkpointer()
+    multi_agent_graph = build_graph(checkpointer=checkpointer)
 
-    print(f"Graph Image saved to: {output_path}")
+    # Initialize database and seed data
+    from app.db import init_db
+    from app.db_init import seed_orders
+    init_db()
+    seed_orders()
 
-    logger.info("All components initialized. Ready to serve requests.")
+    output_path = Path.cwd() / "multi_agent_graph.png"
+
+    try:
+        output_path.write_bytes(
+            multi_agent_graph.get_graph().draw_mermaid_png()
+        )
+        print(f"Graph Image saved to: {output_path}")
+    except Exception as e:
+        print(f"Could not save graph image: {e}")
+
+    logger.info("All components initialized. Ready to serve requests.", extra={"extra_data": {
+        "checkpoint_storage": settings.checkpoint_storage,
+        "checkpoint_path": settings.checkpoint_path,
+    }})
 
     yield  # App is running
 
@@ -98,6 +114,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.state.limiter = limiter
+
+# Mount static files
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_index():
+    """Serve the test chat UI."""
+    return FileResponse("app/static/index.html")
 
 
 # === Exception Handlers ===
@@ -179,22 +204,36 @@ async def query_agents(request: Request, body: QueryRequest):
             return QueryResponse(
                 query=body.query,
                 response=cached_response,
-                agent_used="cache",
+                entry_agent="cache",
+                final_agent="cache",
                 visited_agents=[],
+                route=[],
+                intents=[],
+                order_id=None,
+                retrieved_documents=[],
+                citations=None,
                 cached=True,
                 processing_time_ms=0,
                 security_notes=security_notes,
             )
 
         # ---- Step 3: Invoke Multi-Agent Graph ----
+        thread_id = body.thread_id or str(uuid.uuid4())
+        graph_config = {
+            "configurable": {
+                "thread_id": thread_id,
+            }
+        }
+
         try:
             initial_state: AgentState = {
                 "query": cleaned_message,
                 "next_agent": None,
                 "visited_agents": [],
                 "handoff_count": 0,
+                "route": [],
             }
-            result = multi_agent_graph.invoke(initial_state)
+            result = multi_agent_graph.invoke(initial_state, config=graph_config)
         except Exception as e:
             logger.error(f"Agent invocation failed: {e}", extra={"extra_data": {
                 "query": body.query[:100],
@@ -207,7 +246,30 @@ async def query_agents(request: Request, body: QueryRequest):
             )
 
         response_text = result.get("response", "")
-        agent_used = result.get("current_agent", "unknown")
+        visited = result.get("visited_agents", [])
+        entry_agent = visited[0] if visited else "unknown"
+        final_agent = result.get("current_agent", "unknown")
+        route_trace = result.get("route", [])
+        intents = result.get("intents", [])
+        order_id = result.get("order_id")
+        retrieved_documents = result.get("retrieved_documents", [])
+
+        evaluation = result.get("evaluation", {})
+        invalid_citations = set(evaluation.get("invalid_citations", []))
+        raw_citations = result.get("citations", []) or []
+        citations = [c for c in raw_citations if c not in invalid_citations]
+
+        logger.info("graph_invoke_result", extra={"extra_data": {
+            "query": body.query[:200],
+            "response_preview": response_text[:200],
+            "visited_agents": visited,
+            "final_agent": final_agent,
+            "route_length": len(route_trace),
+            "intents": intents,
+            "order_id": order_id,
+            "retrieved_doc_count": len(retrieved_documents),
+            "evaluation_passed": evaluation.get("passed"),
+        }})
 
         # ---- Step 4: Output Validation ----
         validated_response, output_warnings = security.check_output(response_text)
@@ -235,18 +297,26 @@ async def query_agents(request: Request, body: QueryRequest):
 
     logger.info("Request completed", extra={"extra_data": {
         "query": body.query[:100],
-        "agent_used": agent_used,
+        "entry_agent": entry_agent,
+        "final_agent": final_agent,
         "latency_ms": round(timer.elapsed_ms, 2),
-        "visited_agents": result.get("visited_agents", []),
+        "visited_agents": visited,
         "citations": result.get("citations", []),
+        "route_length": len(route_trace),
     }})
 
     return QueryResponse(
         query=body.query,
         response=validated_response,
-        agent_used=agent_used,
-        visited_agents=result.get("visited_agents", []),
-        citations=result.get("citations"),
+        entry_agent=entry_agent,
+        final_agent=final_agent,
+        visited_agents=visited,
+        route=route_trace,
+        intents=intents,
+        order_id=order_id,
+        thread_id=thread_id,
+        retrieved_documents=retrieved_documents,
+        citations=citations,
         cached=False,
         processing_time_ms=round(timer.elapsed_ms, 2),
         security_notes=security_notes,
