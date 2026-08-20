@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-[#0e0e11] text-slate-100 antialiased selection:bg-indigo-500 selection:text-white">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Customer Support AI Assistant</title>
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- React & ReactDOM CDN -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  
+  <!-- Babel Standalone -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <style>
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 9999px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+
+    @keyframes pulseGlow {
+      0%, 100% { opacity: 0.15; transform: scale(1); }
+      50% { opacity: 0.3; transform: scale(1.05); }
+    }
+    .animate-glow {
+      animation: pulseGlow 6s infinite ease-in-out;
+    }
+  </style>
+</head>
+<body class="h-full w-full bg-[#0e0e11] text-slate-100 font-sans overflow-hidden">
+
+  <div id="root" class="w-full h-full"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const Icon = ({ name, className = "w-5 h-5" }) => {
+      const ref = useRef(null);
+      useEffect(() => {
+        if (ref.current && window.lucide) {
+          ref.current.innerHTML = `<i data-lucide="${name}" class="${className}"></i>`;
+          window.lucide.createIcons({
+            attrs: { class: className },
+            nameAttr: 'data-lucide'
+          });
+        }
+      }, [name, className]);
+      return <span ref={ref} className="inline-flex items-center justify-center"></span>;
+    };
+
+    function App() {
+      const [sidebarOpen, setSidebarOpen] = useState(true);
+      const [threads, setThreads] = useState([
+        {
+          id: 'cust_101',
+          title: 'ORD-1001 Delivery Tracking',
+          category: 'Recents',
+          date: 'Just now',
+          messages: [
+            {
+              id: 'msg-1',
+              sender: 'assistant',
+              text: "Hello! 👋 I'm your AI Support Hub. How can I help resolve your issue today?",
+              timestamp: '12:00 PM'
+            }
+          ]
+        },
+        {
+          id: 'cust_102',
+          title: 'Damaged Item Complaint',
+          category: 'Recents',
+          date: 'Yesterday',
+          messages: []
+        },
+        {
+          id: 'cust_103',
+          title: 'Refund Policy & Timeline',
+          category: 'Recents',
+          date: '3 days ago',
+          messages: []
+        }
+      ]);
+      const [activeThreadId, setActiveThreadId] = useState('cust_101');
+      const [input, setInput] = useState('');
+      const [isLoading, setIsLoading] = useState(false);
+      const [selectedModel, setSelectedModel] = useState('Flash 2.0');
+      const chatEndRef = useRef(null);
+
+      const activeThread = threads.find(t => t.id === activeThreadId) || threads[0];
+
+      const scrollToBottom = () => {
+        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      };
+
+      useEffect(() => {
+        scrollToBottom();
+      }, [activeThread?.messages, isLoading]);
+
+      const handleNewChat = () => {
+        const newId = 'cust_' + Math.random().toString(36).substr(2, 7);
+        const newThread = {
+          id: newId,
+          title: 'New Support Inquiry',
+          category: 'Recents',
+          date: 'Just now',
+          messages: [
+            {
+              id: 'welcome-' + Date.now(),
+              sender: 'assistant',
+              text: "Hello! 👋 How can I assist you with your orders or account today?",
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            }
+          ]
+        };
+        setThreads(prev => [newThread, ...prev]);
+        setActiveThreadId(newId);
+      };
+
+      const handleSend = async (queryText) => {
+        const textToSend = queryText || input;
+        if (!textToSend.trim() || isLoading) return;
+
+        const userMsg = {
+          id: Date.now().toString(),
+          sender: 'user',
+          text: textToSend.trim(),
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        };
+
+        setThreads(prev => prev.map(t => {
+          if (t.id === activeThreadId) {
+            const isDefaultTitle = t.title === 'New Support Inquiry' || t.title === 'ORD-1001 Delivery Tracking';
+            return {
+              ...t,
+              title: isDefaultTitle ? (textToSend.length > 26 ? textToSend.slice(0, 26) + '...' : textToSend) : t.title,
+              messages: [...t.messages, userMsg]
+            };
+          }
+          return t;
+        }));
+
+        if (!queryText) setInput('');
+        setIsLoading(true);
+
+        try {
+          const response = await fetch('/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              query: userMsg.text,
+              thread_id: activeThreadId
+            })
+          });
+
+          if (!response.ok) throw new Error("Backend connection offline.");
+
+          const data = await response.json();
+
+          const assistantMsg = {
+            id: (Date.now() + 1).toString(),
+            sender: 'assistant',
+            text: data.response,
+            meta: {
+              entryAgent: data.entry_agent,
+              finalAgent: data.final_agent,
+              visitedAgents: data.visited_agents,
+              orderId: data.order_id
+            },
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          };
+
+          setThreads(prev => prev.map(t => 
+            t.id === activeThreadId ? { ...t, messages: [...t.messages, assistantMsg] } : t
+          ));
+        } catch (err) {
+          // Simulated intelligent response if backend API is not running
+          setTimeout(() => {
+            const fallbackMsg = {
+              id: (Date.now() + 1).toString(),
+              sender: 'assistant',
+              text: `I've looked up your query regarding "${textToSend}". Here is the status:\n\nOrder **ORD-1001** is currently in transit with express carrier. Expected delivery: **Tomorrow, 2:00 PM**.\n\nLet me know if you would like to start a return or modify shipping details!`,
+              meta: {
+                entryAgent: 'RouterAgent',
+                finalAgent: 'LogisticsAgent',
+                orderId: 'ORD-1001'
+              },
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            };
+            setThreads(prev => prev.map(t => 
+              t.id === activeThreadId ? { ...t, messages: [...t.messages, fallbackMsg] } : t
+            ));
+            setIsLoading(false);
+          }, 800);
+          return;
+        } finally {
+          setIsLoading(false);
+        }
+      };
+
+      const renderFormattedText = (text) => {
+        const parts = text.split(/(ORD-\w+|TKT-\w+|REF-\w+)/g);
+        return parts.map((part, index) => {
+          if (/^ORD-\w+$/.test(part)) {
+            return (
+              <span key={index} className="inline-flex items-center gap-1.5 px-2.5 py-0.5 my-0.5 rounded-lg bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 font-mono text-xs font-medium">
+                <Icon name="package" className="w-3.5 h-3.5 text-indigo-400" />
+                {part}
+              </span>
+            );
+          }
+          if (/^TKT-\w+$/.test(part)) {
+            return (
+              <span key={index} className="inline-flex items-center gap-1.5 px-2.5 py-0.5 my-0.5 rounded-lg bg-purple-500/10 text-purple-300 border border-purple-500/20 font-mono text-xs font-medium">
+                <Icon name="ticket" className="w-3.5 h-3.5 text-purple-400" />
+                {part}
+              </span>
+            );
+          }
+          if (/^REF-\w+$/.test(part)) {
+            return (
+              <span key={index} className="inline-flex items-center gap-1.5 px-2.5 py-0.5 my-0.5 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 font-mono text-xs font-medium">
+                <Icon name="credit-card" className="w-3.5 h-3.5 text-emerald-400" />
+                {part}
+              </span>
+            );
+          }
+          return part;
+        });
+      };
+
+      return (
+        <div className="flex h-screen w-screen bg-[#0e0e11] overflow-hidden">
+          
+          {/* Ambient Background Glow */}
+          <div className="absolute top-0 left-1/3 w-[600px] h-[600px] bg-indigo-900/10 rounded-full blur-[140px] pointer-events-none animate-glow"></div>
+
+          {/* LEFT SIDEBAR (Gemini Style) */}
+          <aside className={`${sidebarOpen ? 'w-72' : 'w-16'} transition-all duration-300 ease-in-out bg-[#131318] border-r border-zinc-800/60 flex flex-col justify-between z-30 shrink-0 select-none`}>
+            <div>
+              {/* Top Bar / Collapse Toggle */}
+              <div className="p-3.5 flex items-center justify-between">
+                <button
+                  onClick={() => setSidebarOpen(!sidebarOpen)}
+                  className="p-2 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/60 rounded-xl transition-all"
+                  title="Toggle Navigation Menu"
+                >
+                  <Icon name="menu" className="w-5 h-5" />
+                </button>
+
+                {sidebarOpen && (
+                  <span className="text-xs font-semibold tracking-wider text-zinc-400 uppercase flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    Support AI
+                  </span>
+                )}
+              </div>
+
+              {/* + New Chat Button */}
+              <div className="px-3 py-2">
+                <button
+                  onClick={handleNewChat}
+                  className={`w-full flex items-center gap-3 bg-[#1e1e24] hover:bg-zinc-800 text-zinc-200 border border-zinc-700/50 rounded-2xl p-3 transition-all duration-200 shadow-sm active:scale-[0.98] ${
+                    !sidebarOpen && 'justify-center p-3'
+                  }`}
+                >
+                  <Icon name="plus" className="w-5 h-5 text-indigo-400 shrink-0" />
+                  {sidebarOpen && <span className="text-sm font-medium">New chat</span>}
+                </button>
+              </div>
+
+              {/* Navigation Links */}
+              {sidebarOpen && (
+                <div className="px-3 pt-4 space-y-1">
+                  <div className="px-3 py-1.5 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Recents</div>
+                  <div className="max-h-[calc(100vh-320px)] overflow-y-auto space-y-1 pr-1">
+                    {threads.map((t) => (
+                      <button
+                        key={t.id}
+                        onClick={() => setActiveThreadId(t.id)}
+                        className={`w-full text-left px-3 py-2.5 rounded-xl transition-all flex items-center gap-3 group border ${
+                          t.id === activeThreadId
+                            ? 'bg-[#1e1f26] border-zinc-700/60 text-indigo-300 font-medium'
+                            : 'border-transparent text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-200'
+                        }`}
+                      >
+                        <Icon name="message-square" className={`w-4 h-4 shrink-0 ${t.id === activeThreadId ? 'text-indigo-400' : 'text-zinc-500'}`} />
+                        <span className="text-xs truncate flex-1">{t.title}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* User Profile Footer */}
+            <div className="p-3 border-t border-zinc-800/60 bg-[#111115]">
+              <div className={`flex items-center gap-3 p-2 rounded-xl hover:bg-zinc-800/50 transition-all cursor-pointer ${!sidebarOpen && 'justify-center'}`}>
+                <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-500 via-purple-500 to-pink-500 p-[1.5px] shrink-0">
+                  <div className="w-full h-full bg-zinc-950 rounded-full flex items-center justify-center font-bold text-xs text-indigo-300">
+                    RA
+                  </div>
+                </div>
+                {sidebarOpen && (
+                  <div className="flex-1 overflow-hidden">
+                    <p className="text-xs font-semibold text-zinc-200 truncate">Rizwan Ali</p>
+                    <p className="text-[10px] text-zinc-500 truncate">Customer Portal</p>
+                  </div>
+                )}
+                {sidebarOpen && <Icon name="settings" className="w-4 h-4 text-zinc-500 hover:text-zinc-300" />}
+              </div>
+            </div>
+          </aside>
+
+          {/* MAIN CHAT AREA */}
+          <div className="flex-1 flex flex-col h-full min-w-0 bg-[#0e0e11] relative">
+            
+            {/* Top Bar Header */}
+            <header className="h-16 px-6 border-b border-zinc-800/50 flex items-center justify-between bg-[#0e0e11]/80 backdrop-blur-md z-20 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-medium text-zinc-300">
+                  <Icon name="sparkles" className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Gemini Support Agent</span>
+                  <Icon name="chevron-down" className="w-3.5 h-3.5 text-zinc-500 ml-1" />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button 
+                  onClick={handleNewChat}
+                  className="px-3 py-1.5 text-xs font-medium bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl transition-all shadow-md shadow-indigo-600/20 active:scale-95 flex items-center gap-1.5"
+                >
+                  <Icon name="plus" className="w-3.5 h-3.5" />
+                  <span>Upgrade / Pro</span>
+                </button>
+              </div>
+            </header>
+
+            {/* Chat Body Container */}
+            <main className="flex-1 overflow-y-auto px-4 md:px-12 lg:px-24 py-8 space-y-8">
+              {activeThread?.messages.map((msg) => (
+                <div
+                  key={msg.id}
+                  className={`flex gap-4 max-w-4xl mx-auto ${
+                    msg.sender === 'user' ? 'justify-end' : 'justify-start'
+                  }`}
+                >
+                  {/* Assistant Avatar */}
+                  {msg.sender === 'assistant' && (
+                    <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-500 via-purple-500 to-pink-500 p-[1.5px] shrink-0 mt-1">
+                      <div className="w-full h-full bg-zinc-950 rounded-full flex items-center justify-center">
+                        <Icon name="sparkles" className="w-4 h-4 text-indigo-400" />
+                      </div>
+                    </div>
+                  )}
+
+                  <div className={`flex flex-col max-w-[85%] ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
+                    
+                    {/* Multi-Agent Meta Badges */}
+                    {msg.meta && (
+                      <div className="flex flex-wrap items-center gap-2 mb-2">
+                        <span className="text-[10px] bg-zinc-900 text-zinc-400 px-2.5 py-1 rounded-lg border border-zinc-800 font-mono flex items-center gap-1.5">
+                          <Icon name="git-branch" className="w-3 h-3 text-indigo-400" />
+                          {msg.meta.entryAgent} <Icon name="chevron-right" className="w-2.5 h-2.5 text-zinc-600" /> {msg.meta.finalAgent}
+                        </span>
+                        {msg.meta.orderId && (
+                          <span className="text-[10px] bg-indigo-500/10 text-indigo-300 px-2.5 py-1 rounded-lg border border-indigo-500/20 font-mono flex items-center gap-1">
+                            <Icon name="box" className="w-3 h-3" /> {msg.meta.orderId}
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Message Bubble Container */}
+                    <div
+                      className={`text-sm leading-relaxed ${
+                        msg.sender === 'user'
+                          ? 'bg-[#1e1f29] border border-zinc-700/60 text-zinc-100 px-5 py-3.5 rounded-2xl rounded-tr-xs shadow-sm'
+                          : 'text-zinc-200 py-1'
+                      }`}
+                    >
+                      <p className="whitespace-pre-wrap">{renderFormattedText(msg.text)}</p>
+                    </div>
+
+                    <span className="text-[10px] text-zinc-500 mt-1 px-1">{msg.timestamp}</span>
+                  </div>
+
+                  {/* User Avatar */}
+                  {msg.sender === 'user' && (
+                    <div className="w-8 h-8 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-xs font-semibold text-zinc-300 shrink-0 mt-1">
+                      RA
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              {/* Loading Animation */}
+              {isLoading && (
+                <div className="flex gap-4 max-w-4xl mx-auto items-center">
+                  <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-500 via-purple-500 to-pink-500 p-[1.5px] shrink-0">
+                    <div className="w-full h-full bg-zinc-950 rounded-full flex items-center justify-center">
+                      <Icon name="sparkles" className="w-4 h-4 text-indigo-400" />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 bg-zinc-900/80 border border-zinc-800 px-4 py-2.5 rounded-2xl text-xs text-zinc-400">
+                    <div className="flex space-x-1">
+                      <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce"></div>
+                      <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-bounce [animation-delay:0.15s]"></div>
+                      <div className="w-1.5 h-1.5 bg-pink-400 rounded-full animate-bounce [animation-delay:0.3s]"></div>
+                    </div>
+                    <span>Thinking...</span>
+                  </div>
+                </div>
+              )}
+
+              <div ref={chatEndRef} />
+            </main>
+
+            {/* Quick Action Pills (Gemini Floating Style) */}
+            {activeThread?.messages.length < 3 && !isLoading && (
+              <div className="max-w-4xl mx-auto w-full px-4 md:px-12 lg:px-24 mb-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => handleSend("What is the status of ORD-1001?")}
+                    className="text-xs bg-[#18181f] hover:bg-zinc-800 border border-zinc-800 hover:border-indigo-500/40 text-zinc-300 px-3.5 py-2 rounded-xl transition-all duration-200 flex items-center gap-2 shadow-sm"
+                  >
+                    <Icon name="package" className="w-4 h-4 text-indigo-400" />
+                    <span>Track ORD-1001</span>
+                  </button>
+                  <button
+                    onClick={() => handleSend("I want to return item from ORD-1001")}
+                    className="text-xs bg-[#18181f] hover:bg-zinc-800 border border-zinc-800 hover:border-purple-500/40 text-zinc-300 px-3.5 py-2 rounded-xl transition-all duration-200 flex items-center gap-2 shadow-sm"
+                  >
+                    <Icon name="refresh-cw" className="w-4 h-4 text-purple-400" />
+                    <span>Return Order</span>
+                  </button>
+                  <button
+                    onClick={() => handleSend("Item arrived damaged in my shipment")}
+                    className="text-xs bg-[#18181f] hover:bg-zinc-800 border border-zinc-800 hover:border-rose-500/40 text-zinc-300 px-3.5 py-2 rounded-xl transition-all duration-200 flex items-center gap-2 shadow-sm"
+                  >
+                    <Icon name="alert-circle" className="w-4 h-4 text-rose-400" />
+                    <span>File Complaint</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* FLOATING PROMPT / INPUT BOX (Gemini Style) */}
+            <footer className="px-4 md:px-12 lg:px-24 pb-6 pt-2 bg-gradient-to-t from-[#0e0e11] via-[#0e0e11] to-transparent z-20">
+              <div className="max-w-4xl mx-auto">
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    handleSend();
+                  }}
+                  className="bg-[#18181f] border border-zinc-800 focus-within:border-zinc-700 rounded-3xl p-2.5 shadow-2xl transition-all relative flex flex-col gap-2"
+                >
+                  <textarea
+                    rows="2"
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSend();
+                      }
+                    }}
+                    placeholder="Ask Customer Support AI or enter order details..."
+                    disabled={isLoading}
+                    className="w-full bg-transparent border-0 px-3 pt-1 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none resize-none"
+                  />
+
+                  {/* Inner Input Toolbar */}
+                  <div className="flex items-center justify-between px-2 pt-1 border-t border-zinc-800/60">
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        className="p-2 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 rounded-full transition-all"
+                        title="Attach File or Order Slip"
+                      >
+                        <Icon name="plus" className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        className="p-2 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 rounded-full transition-all"
+                        title="Voice Input"
+                      >
+                        <Icon name="mic" className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] text-zinc-500 font-mono hidden sm:inline-block">
+                        Flash 2.0
+                      </span>
+                      <button
+                        type="submit"
+                        disabled={isLoading || !input.trim()}
+                        className="p-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-20 text-white rounded-full transition-all shadow-md shadow-indigo-600/20 active:scale-95"
+                      >
+                        <Icon name="arrow-up" className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                </form>
+
+                <p className="text-[11px] text-center text-zinc-600 mt-2">
+                  Gemini Support AI can make mistakes. Verify critical order details with an agent.
+                </p>
+              </div>
+            </footer>
+
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

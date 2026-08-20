@@ -2,9 +2,11 @@ from pydantic import BaseModel, Field
 
 from app.agents.state import AgentState, AgentName
 from app.config import get_settings
+from app.monitoring import get_logger
 from langchain_core.prompts import ChatPromptTemplate
 
 settings = get_settings()
+logger = get_logger("evaluator_agent")
 
 
 class EvaluationResult(BaseModel):
@@ -58,14 +60,16 @@ EVALUATOR_PROMPT = ChatPromptTemplate.from_messages([
         "\n   - shipping_policy: requires retrieved_documents covering shipping"
         "\n   - return_policy / refund_policy: requires retrieved_documents covering returns/refunds"
         "\n   - account_security: requires retrieved_documents covering security"
-        "\n   - coding: requires non-empty code_result"
-        "\n   - code_review: requires non-empty review_feedback"
+        "\n   - support_ticket / complaint: requires a response acknowledging the issue"
+        "\n   - return_refund: requires return_refund_data with eligibility and reasoning"
         "\n5. HALLUCINATION: Set hallucination=true if ANY claim is made that is not directly supported by the provided data."
+        "\n6. FEEDBACK: If the response is incomplete, provide specific, actionable feedback in 'reason' so the next agent attempt can address the gap."
+        "\n7. If the agent has already been retried 2+ times for the same issue, consider passing rather than retrying indefinitely."
         "\n\nReturn structured evaluation."
     ),
     (
         "user",
-        "User query:\n{query}\n\nDetected intents:\n{intents}\n\nOrder data:\n{order_data}\n\nOrder ID:\n{order_id}\n\nRetrieved documents:\n{retrieved_documents}\n\nCode result:\n{code_result}\n\nReview feedback:\n{review_feedback}\n\nContext:\n{context}"
+        "User query:\n{query}\n\nDetected intents:\n{intents}\n\nAgent response:\n{response}\n\nHandoff feedback:\n{handoff_reason}\n\nOrder data:\n{order_data}\n\nOrder ID:\n{order_id}\n\nRetrieved documents:\n{retrieved_documents}\n\nReturn/Refund data:\n{return_refund_data}\n\nContext:\n{context}"
     ),
 ])
 
@@ -74,13 +78,14 @@ def evaluator_node(state: AgentState):
     from langchain_openai import ChatOpenAI
 
     query = state.get("query", "")
-    intents = state.get("intents", [])
+    intents = state.get("intents") or []
     order_data = state.get("order_data", {})
     order_id = state.get("order_id")
     retrieved_documents = state.get("retrieved_documents", [])
-    code_result = state.get("code_result", "")
-    review_feedback = state.get("review_feedback", "")
+    return_refund_data = state.get("return_refund_data", {})
     context = state.get("context", [])
+    response = state.get("response", "")
+    handoff_reason = state.get("handoff_reason", "")
 
     llm = ChatOpenAI(
         base_url=settings.openrouter_base_url,
@@ -96,26 +101,46 @@ def evaluator_node(state: AgentState):
         result = chain.invoke({
             "query": query,
             "intents": intents,
+            "response": response,
+            "handoff_reason": handoff_reason,
             "order_data": order_data,
             "order_id": order_id,
             "retrieved_documents": retrieved_documents,
-            "code_result": code_result,
-            "review_feedback": review_feedback,
+            "return_refund_data": return_refund_data,
             "context": context,
         })
         evaluation = result.model_dump()
-    except Exception:
+        logger.info("evaluator_result", extra={"extra_data": {
+            "passed": evaluation.get("passed"),
+            "grounded": evaluation.get("grounded"),
+            "complete": evaluation.get("complete"),
+            "hallucination": evaluation.get("hallucination"),
+            "recommended_agent": evaluation.get("recommended_agent"),
+            "reason": evaluation.get("reason"),
+        }})
+    except Exception as e:
         evaluation = _safe_default_evaluation()
+        logger.error("evaluator_exception", extra={"extra_data": {
+            "query": query[:200],
+            "error": str(e),
+        }})
 
     if not evaluation.get("passed", True):
-        evaluation["recommended_agent"] = evaluation.get("recommended_agent") or "rag"
+        evaluation["recommended_agent"] = evaluation.get("recommended_agent") or "policy_rag"
 
     action = "pass" if evaluation.get("passed", True) else f"retry_{evaluation.get('recommended_agent', 'end')}"
+
+    logger.info("evaluator_routing", extra={"extra_data": {
+        "passed": evaluation.get("passed"),
+        "next_agent": evaluation.get("recommended_agent") if not evaluation.get("passed", True) else None,
+        "action": action,
+    }})
 
     return {
         "current_agent": "evaluator",
         "evaluation": evaluation,
         "next_agent": evaluation.get("recommended_agent") if not evaluation.get("passed", True) else None,
+        "handoff_reason": evaluation.get("reason", ""),
         "route": _add_route(state, action),
     }
 

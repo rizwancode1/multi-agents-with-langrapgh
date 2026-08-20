@@ -1,8 +1,10 @@
 from app.agents.state import AgentState, AgentName
 from app.config import get_settings
+from app.monitoring import get_logger
 from langchain_core.prompts import ChatPromptTemplate
 
 settings = get_settings()
+logger = get_logger("formatter_agent")
 
 
 def _add_route(state: AgentState, action: str) -> list[dict]:
@@ -22,10 +24,11 @@ FORMATTER_PROMPT = ChatPromptTemplate.from_messages([
         " Do NOT add information from general knowledge."
         " IMPORTANT: Absence of mention does NOT imply the opposite is true."
         " If data does not state whether something is true or false, do not make any claim about it."
+        " If no data is provided, produce a helpful response based on the available context."
     ),
     (
         "user",
-        "User question:\n{question}\n\nOrder data:\n{order_data}\n\nGenerated code:\n{code_result}\n\nReview feedback:\n{review_feedback}\n\nRetrieved context:\n{context}"
+        "User question:\n{question}\n\nOrder data:\n{order_data}\n\nReturn/Refund data:\n{return_refund_data}\n\nRetrieved context:\n{context}"
     ),
 ])
 
@@ -35,9 +38,19 @@ def formatter_node(state: AgentState):
 
     query = state["query"]
     order_data = state.get("order_data", {})
-    code_result = state.get("code_result", "")
-    review_feedback = state.get("review_feedback", "")
+    return_refund_data = state.get("return_refund_data", {})
     context = state.get("context", [])
+
+    logger.info("formatter_node_started", extra={"extra_data": {
+        "query": query[:200],
+        "order_data_type": type(order_data).__name__,
+        "order_data_empty": not bool(order_data),
+        "return_refund_data_type": type(return_refund_data).__name__,
+        "return_refund_data_empty": not bool(return_refund_data),
+        "context_length": len(context) if context else 0,
+        "context_empty": not bool(context),
+        "visited_agents": state.get("visited_agents", []),
+    }})
 
     llm = ChatOpenAI(
         base_url=settings.openrouter_base_url,
@@ -50,13 +63,18 @@ def formatter_node(state: AgentState):
         chain = FORMATTER_PROMPT | llm
         formatted = chain.invoke({
             "question": query,
-            "order_data": str(order_data) if order_data else "",
-            "code_result": code_result,
-            "review_feedback": review_feedback,
-            "context": "\n".join(f"[{i}] {c}" for i, c in enumerate(context, 1)) if context else "",
+            "order_data": str(order_data) if order_data else "No order data available.",
+            "return_refund_data": str(return_refund_data) if return_refund_data else "No return/refund data available.",
+            "context": "\n".join(f"[{i}] {c}" for i, c in enumerate(context, 1)) if context else "No retrieved context available.",
         })
         response_text = formatted.content
-    except Exception:
+        logger.info("formatter_llm_invoked", extra={"extra_data": {
+            "response_length": len(response_text) if response_text else 0,
+        }})
+    except Exception as e:
+        logger.error("formatter_llm_error", extra={"extra_data": {
+            "error": str(e),
+        }})
         response_text = "I couldn't format the response at this time."
 
     return {

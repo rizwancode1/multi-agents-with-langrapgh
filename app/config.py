@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     max_retrieval_retries: int = 1
     ingest_on_startup: bool = True
     
+    # Checkpoints
+    checkpoint_storage: str = Field(default="sqlite", validation_alias="CHECKPOINT_STORAGE")
+    checkpoint_path: str = Field(default="./checkpoints.db", validation_alias="CHECKPOINT_PATH")
+    checkpoint_table: str = Field(default="checkpoints", validation_alias="CHECKPOINT_TABLE")
+    
     model_config = {
         "env_file": ".env",
         "extra": "ignore",

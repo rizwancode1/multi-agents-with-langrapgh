@@ -19,6 +19,9 @@ dependencies = [
     "pypdf>=4.0",
     "langchain-chroma>=0.1.0",
     "langchain-community>=0.3.0",
+    "sqlalchemy>=2.0.0",
+    "langgraph-checkpoint-sqlite>=1.0.0",
+    "langgraph-checkpoint>=4.2.0",
 ]
 
 [dependency-groups]

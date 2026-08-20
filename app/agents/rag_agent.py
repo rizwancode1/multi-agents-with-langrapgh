@@ -7,8 +7,10 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from app.agents.state import AgentState
 from app.config import get_settings
+from app.monitoring import get_logger
 
 settings = get_settings()
+logger = get_logger("rag_agent")
 
 KB_PATH = Path(__file__).resolve().parents[2] / "app" / "data" / "rag_knowledge_base.json"
 
@@ -89,6 +91,13 @@ def rag_node(state: AgentState):
         for doc in documents
     ]
 
+    logger.info("rag_docs_retrieved", extra={"extra_data": {
+        "query": query[:200],
+        "doc_count": len(retrieved_documents),
+        "doc_ids": [d["document_id"] for d in retrieved_documents],
+        "scores": [d["score"] for d in retrieved_documents],
+    }})
+
     llm = ChatOpenAI(
         base_url=settings.openrouter_base_url,
         api_key=settings.openrouter_api_key or "sk-placeholder",
@@ -100,8 +109,15 @@ def rag_node(state: AgentState):
         chain = RAG_PROMPT | llm
         answer = chain.invoke({"question": query, "context": context})
         response_text = answer.content
-    except Exception:
+        logger.info("rag_llm_response", extra={"extra_data": {
+            "response_length": len(response_text) if response_text else 0,
+        }})
+    except Exception as e:
         response_text = "I couldn't retrieve an answer at this time."
+        logger.error("rag_llm_error", extra={"extra_data": {
+            "query": query[:200],
+            "error": str(e),
+        }})
 
     citations = [doc["document_id"] for doc in retrieved_documents]
 

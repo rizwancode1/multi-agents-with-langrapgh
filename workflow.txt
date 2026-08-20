@@ -1,62 +1,46 @@
-                         ┌──────────────┐
-                         │     User     │
-                         └──────┬───────┘
+                              START
                                 │
                                 ▼
-                       ┌─────────────────┐
-                       │   Router Agent  │
-                       │ Intent +        │
-                       │ Capability      │
-                       │ Matching        │
-                       └────────┬────────┘
-                                │
-             ┌──────────────────┼───────────────────┐
-             │                  │                   │
-             ▼                  ▼                   ▼
-      ┌────────────┐     ┌────────────┐      ┌────────────┐
-      │ RAG Agent  │     │ Order Agent│      │ Coding     │
-      │            │     │            │      │ Agent      │
-      └─────┬──────┘     └─────┬──────┘      └─────┬──────┘
-            │                  │                    │
-            │                  │                    │
-            └──────────────┬───┴────────────────────┘
-                           ▼
-                    ┌──────────────┐
-                    │   Evaluator  │
-                    │ Grounding /  │
-                    │ Correctness  │
-                    └───────┬──────┘
-                            │
-                  ┌─────────┴─────────┐
-                  │                   │
-                PASS                FAIL
-                  │                   │
-                  ▼                   ▼
-                 END            Retry / Handoff
+                    ┌─────────────────────┐
+                    │ Support Supervisor  │
+                    │ Intent + Planning   │
+                    └──────────┬──────────┘
+                               │
+          ┌────────────────────┼─────────────────────┐
+          │                    │                     │
+          ▼                    ▼                     ▼
+     ┌─────────┐          ┌─────────┐         ┌─────────────┐
+     │  Order  │          │ Policy  │         │   Support   │
+     │  Agent  │          │   RAG   │         │ Ticket Agent│
+     └────┬────┘          └────┬────┘         └──────┬──────┘
+          │                    │                     │
+          │                    │                     │
+          ▼                    ▼                     ▼
+     Order Tools          Vector/BM25           Ticket Tools
+                              │
+                              │
+                              ▼
+                       ┌──────────────┐
+                       │ Return/Refund│
+                       │    Agent     │
+                       └──────┬───────┘
+                              │
+                              ▼
+                         Action Tools
+                              │
+                              ▼
+                    ┌──────────────────┐
+                    │     Evaluator    │
+                    └────────┬─────────┘
+                             │
+                     ┌───────┴────────┐
+                     │                │
+                   PASS              FAIL
+                     │                │
+                     ▼                ▼
+                 Formatter        Retry/Repair
+                     │
+                     ▼
+                    END
 
-
-
-
-
-                 API
-                  │
-                  ▼
-            Authentication
-                  │
-                  ▼
-             Router Agent
-                  │
-        ┌─────────┼──────────┐
-        ▼         ▼          ▼
-       RAG      Orders     Coding
-        │         │          │
-        └────┬────┴──────┬───┘
-             │           │
-             ▼           ▼
-         Handoff      Tool Calls
-             │
-             ▼
-          Evaluator
-             │
-             ▼
-        Final Response
+                    

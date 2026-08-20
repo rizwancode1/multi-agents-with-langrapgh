@@ -12,10 +12,12 @@ Wires together:
 
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -31,8 +33,9 @@ from app.models import (
 from app.security import SecurityPipeline
 from app.cache import ResponseCache
 from app.monitoring import get_logger, MetricsCollector, RequestTimer
-from app.agents.graph import graph
+from app.agents.graph import build_graph
 from app.agents.state import AgentState
+from app.checkpoints import get_checkpointer
 from pathlib import Path
 
 load_dotenv()
@@ -68,7 +71,15 @@ async def lifespan(app: FastAPI):
     security = SecurityPipeline()
     cache = ResponseCache(ttl_seconds=settings.cache_ttl_seconds)
     metrics = MetricsCollector()
-    multi_agent_graph = graph
+
+    checkpointer = get_checkpointer()
+    multi_agent_graph = build_graph(checkpointer=checkpointer)
+
+    # Initialize database and seed data
+    from app.db import init_db
+    from app.db_init import seed_orders
+    init_db()
+    seed_orders()
 
     output_path = Path.cwd() / "multi_agent_graph.png"
 
@@ -80,7 +91,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Could not save graph image: {e}")
 
-    logger.info("All components initialized. Ready to serve requests.")
+    logger.info("All components initialized. Ready to serve requests.", extra={"extra_data": {
+        "checkpoint_storage": settings.checkpoint_storage,
+        "checkpoint_path": settings.checkpoint_path,
+    }})
 
     yield  # App is running
 
@@ -100,6 +114,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.state.limiter = limiter
+
+# Mount static files
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_index():
+    """Serve the test chat UI."""
+    return FileResponse("app/static/index.html")
 
 
 # === Exception Handlers ===
@@ -195,6 +218,13 @@ async def query_agents(request: Request, body: QueryRequest):
             )
 
         # ---- Step 3: Invoke Multi-Agent Graph ----
+        thread_id = body.thread_id or str(uuid.uuid4())
+        graph_config = {
+            "configurable": {
+                "thread_id": thread_id,
+            }
+        }
+
         try:
             initial_state: AgentState = {
                 "query": cleaned_message,
@@ -203,7 +233,7 @@ async def query_agents(request: Request, body: QueryRequest):
                 "handoff_count": 0,
                 "route": [],
             }
-            result = multi_agent_graph.invoke(initial_state)
+            result = multi_agent_graph.invoke(initial_state, config=graph_config)
         except Exception as e:
             logger.error(f"Agent invocation failed: {e}", extra={"extra_data": {
                 "query": body.query[:100],
@@ -228,6 +258,18 @@ async def query_agents(request: Request, body: QueryRequest):
         invalid_citations = set(evaluation.get("invalid_citations", []))
         raw_citations = result.get("citations", []) or []
         citations = [c for c in raw_citations if c not in invalid_citations]
+
+        logger.info("graph_invoke_result", extra={"extra_data": {
+            "query": body.query[:200],
+            "response_preview": response_text[:200],
+            "visited_agents": visited,
+            "final_agent": final_agent,
+            "route_length": len(route_trace),
+            "intents": intents,
+            "order_id": order_id,
+            "retrieved_doc_count": len(retrieved_documents),
+            "evaluation_passed": evaluation.get("passed"),
+        }})
 
         # ---- Step 4: Output Validation ----
         validated_response, output_warnings = security.check_output(response_text)
@@ -272,6 +314,7 @@ async def query_agents(request: Request, body: QueryRequest):
         route=route_trace,
         intents=intents,
         order_id=order_id,
+        thread_id=thread_id,
         retrieved_documents=retrieved_documents,
         citations=citations,
         cached=False,
