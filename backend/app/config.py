@@ -36,10 +36,21 @@ class Settings(BaseSettings):
     cache_ttl_seconds: int = 300
     max_retries: int = 3
     
+    # Cache backend: "auto" (redis in production, memory in dev), "memory", or "redis"
+    cache_backend: str = Field(default="auto", validation_alias="CACHE_BACKEND")
+    redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
+    
+    # Database (PostgreSQL in production; also used by PGVector when enabled)
+    database_url: str = Field(default="sqlite:///./orders.db", validation_alias="DATABASE_URL")
+    
+    # Vector store: opt-in PGVector for embeddings storage (independent of the main DB choice)
+    use_pgvector: bool = Field(default=False, validation_alias="USE_PGVECTOR")
+    pgvector_collection: str = Field(default="policy_docs", validation_alias="PGVECTOR_COLLECTION")
     
     # RAG / Ingestion
     dataset_dir: str = "./dataset-docs"
     chroma_persist_dir: str = "./chroma_db"
+    chroma_collection: str = "policy_docs"
     chunk_size: int = 1000
     chunk_overlap: int = 200
     retrieval_top_k: int = 10

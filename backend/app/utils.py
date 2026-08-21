@@ -56,7 +56,7 @@ class CustomOpenRouterEmbeddings(Embeddings):
 
 llm = ChatOpenAI(
     base_url=settings.openrouter_base_url,
-    api_key=settings.openrouter_api_key,
+    api_key=settings.openrouter_api_key or "sk-placeholder",
     model="openrouter/nvidia/nemotron-3-super-120b-a12b:free",
     temperature=0,
 )
@@ -64,7 +64,7 @@ llm = ChatOpenAI(
 
 # 2. Instantiate your custom embedding class
 embeddings = CustomOpenRouterEmbeddings(
-    api_key=settings.openrouter_api_key,
+    api_key=settings.openrouter_api_key or "sk-placeholder",
     base_url=settings.openrouter_base_url,
     model_name=settings.embedding_model
 )

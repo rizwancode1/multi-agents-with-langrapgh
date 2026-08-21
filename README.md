@@ -26,7 +26,7 @@ Users ask questions in natural language and the system routes the request to spe
 │      └─────┬──────┘      └─────┬──────┘      └──────┬───────┘              │
 │            │        ┌──────────┴─────────┐          │                       │
 │            ▼        ▼                    ▼          ▼                       │
-│       Order Tools  Vector/BM25   Return/Refund   Ticket Tools              │
+│       Order Tools  Hybrid RAG    Return/Refund   Ticket Tools              │
 │      (real DB)     retrieval      Agent        (real DB records)           │
 │                                   │                                        │
 │                                   ▼                                        │
@@ -62,12 +62,44 @@ Users ask questions in natural language and the system routes the request to spe
 - **Real database records** — support tickets (`TKT-...`) and refunds (`REF-...`) are persisted and trackable
 - **Structured routing & evaluation** via LLM structured output (`RouteDecision`, `EvaluationResult`)
 - **Database-backed orders** with SQLAlchemy + SQLite
-- **RAG** policy retrieval with Chroma vector search and BM25 fallback
+- **Agentic RAG pipeline** — contextualization → hybrid dense (Chroma/PGVector) + sparse (BM25) retrieval fused with Reciprocal Rank Fusion → LLM reranking (0–10) → context grading → generation → groundedness check, with query-rewrite and complementary-retrieval loops
+- **Pluggable vector store** — local ChromaDB by default; opt-in Postgres PGVector (`USE_PGVECTOR=true`) for embeddings storage
 - **LangGraph checkpoints** (SQLite or in-memory) for stateful multi-turn conversations
 - **Streaming** agent progress over SSE (`/query/stream`)
 - **Security pipeline** — input sanitization, prompt-injection detection, PII masking, output validation
-- **Production features** — rate limiting (slowapi), response caching with TTL, structured JSON logging, metrics, LangSmith tracing
+- **Production features** — rate limiting (slowapi), response caching (Redis in production, in-memory in dev), structured JSON logging, metrics, LangSmith tracing
 - **Conversation store** — persistent conversations/messages API with per-conversation LangGraph thread mapping
+
+### Policy RAG Pipeline
+
+The Policy RAG agent runs a full agentic retrieval loop as an internal sub-graph:
+
+```
+User Message
+    │
+    ▼
+Contextualize (rewrite follow-up into standalone question)
+    │
+    ▼
+Hybrid Retrieve (dense + BM25 fused via Reciprocal Rank Fusion)
+    │
+    ▼
+Rerank (LLM scores each chunk 0–10 → top-k)
+    │
+    ▼
+Grade Context (SUFFICIENT / PARTIAL / NONE / UNANSWERABLE)
+    │
+    ├─── SUFFICIENT ──► Generate Answer ──► Groundedness Check ──► Return Response
+    │                         │ not grounded
+    │                         ▼
+    │                    Rewrite Query (loop, bounded by MAX_RETRIEVAL_RETRIES)
+    │
+    ├─── PARTIAL ──► Retrieve Complementary (new sources, missing aspects) ──► Rerank → Grade (loop)
+    │
+    ├─── NONE ──► Rewrite Query ──► Hybrid Retrieve → Rerank → Grade (loop)
+    │
+    └─── UNANSWERABLE ──► "I don't have sufficient information..."
+```
 
 ## Repository Structure
 
@@ -84,7 +116,10 @@ multi-agents/
 │   │   ├── models_db.py         # SQLAlchemy ORM models
 │   │   ├── db.py / db_init.py   # DB engine + seeding
 │   │   ├── checkpoints.py       # LangGraph checkpoint factory
-│   │   ├── cache.py             # Response caching layer
+│   │   ├── cache.py             # Response caching (memory dev / Redis production)
+│   │   ├── ingestion.py         # KB → Chroma/PGVector + BM25 indexing
+│   │   ├── retrieval.py         # Hybrid dense+BM25 retrieval with RRF fusion
+│   │   ├── reranker.py          # LLM-based chunk reranking (0–10 scoring)
 │   │   ├── security.py          # Input/output security pipeline
 │   │   ├── monitoring.py        # Logging and metrics
 │   │   └── data/                # Seed orders + RAG knowledge base
@@ -184,6 +219,12 @@ Key settings live in `backend/app/config.py` and are overridable via `.env`:
 | `CACHE_TTL_SECONDS` | `300` | Response cache TTL |
 | `CHECKPOINT_STORAGE` | `sqlite` | Checkpoint backend: `memory` or `sqlite` |
 | `CHECKPOINT_PATH` | `./checkpoints.db` | SQLite checkpoint file path |
+| `CACHE_BACKEND` | `auto` | `auto` (Redis in production, memory in dev), `memory`, or `redis` |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL for production cache |
+| `DATABASE_URL` | `sqlite:///./orders.db` | App database; point to PostgreSQL in production |
+| `USE_PGVECTOR` | `false` | Store embeddings in Postgres via PGVector instead of ChromaDB |
+| `RETRIEVAL_TOP_K` / `RERANK_TOP_K` | `10` / `5` | Hybrid retrieval candidates / context kept after reranking |
+| `MAX_RETRIEVAL_RETRIES` | `1` | Max query rewrites when retrieval fails |
 
 ## Running with Docker Compose
 
@@ -213,7 +254,7 @@ docker build -t multi-agents-frontend ./frontend
 ```bash
 # Backend tests & lint
 cd backend
-pytest
+uv run python -m pytest tests/
 ruff check .
 
 # Frontend lint & build

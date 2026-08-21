@@ -11,12 +11,15 @@ from app.config import get_settings
 
 settings = get_settings()
 
-# Use SQLite for local development; swap connection string for PostgreSQL/MySQL in production
-DATABASE_URL = "sqlite:///./orders.db"
+# SQLite for local development; PostgreSQL in production via DATABASE_URL.
+# Also used by PGVector when USE_PGVECTOR=true (requires a Postgres URL).
+DATABASE_URL = settings.database_url
+
+connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False},
+    connect_args=connect_args,
     echo=settings.is_production is False,
 )
 

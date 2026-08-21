@@ -23,7 +23,7 @@ A production-ready multi-agent support system built with LangGraph, FastAPI, SQL
            │                │                     │
            │                │                     │
            ▼                ▼                     ▼
-      Order Tools      Vector/BM25           Ticket Tools
+       Order Tools      Hybrid RAG            Ticket Tools
                             │
                             │
                             ▼
@@ -57,7 +57,7 @@ A production-ready multi-agent support system built with LangGraph, FastAPI, SQL
 |-------|---------|------------|-------|
 | **Supervisor** | Intent detection, planning, and orchestration | order, policy_rag, support_ticket | — |
 | **Order** | Retrieves customer order information from the database | evaluator | `search_orders`, `get_order_by_id`, `get_order_by_customer_name`, `get_order_items` |
-| **Policy RAG** | Retrieves policies, FAQs, and documentation via vector/BM25 search | return_refund, evaluator | — |
+| **Policy RAG** | Agentic RAG: contextualize → hybrid retrieval (dense + BM25/RRF) → LLM rerank → grade context → generate → groundedness check | return_refund, evaluator | — |
 | **Support Ticket** | Creates and tracks support tickets | evaluator | `create_support_ticket`, `get_ticket_status`, `list_tickets_by_email`, `update_ticket_status` |
 | **Return/Refund** | Processes return/refund requests and refund status lookups | evaluator | `calculate_eligible_refund`, `create_refund_request`, `get_refund_status`, `list_refunds_by_order` |
 | **Evaluator** | Scores responses for grounding, correctness, and safety; retries failed agents | formatter, order, policy_rag, support_ticket, return_refund, end | — |
@@ -73,8 +73,12 @@ A production-ready multi-agent support system built with LangGraph, FastAPI, SQL
 - **Structured Routing**: Router uses LLM structured output (`RouteDecision`) for reliable intent classification
 - **Structured Evaluation**: Evaluator uses LLM structured output (`EvaluationResult`) for consistent scoring
 - **Database-Backed Orders**: SQLAlchemy ORM with SQLite for order storage and retrieval
+- **Agentic RAG Pipeline**: Contextualization → hybrid retrieval → LLM reranking → context grading → generation → groundedness verification, with query-rewrite and complementary-retrieval loops
+- **Hybrid Retrieval**: Dense (ChromaDB or PGVector) + sparse (BM25) search fused via Reciprocal Rank Fusion (k=60)
+- **LLM Reranking**: Retrieved chunks scored 0–10 by the primary LLM; only the top `RERANK_TOP_K` are kept for generation
+- **Pluggable Vector Store**: Local ChromaDB by default; opt-in Postgres PGVector via `USE_PGVECTOR=true` (independent of the main app database choice)
 - **LangGraph Checkpoints**: Persistent conversation state via `langgraph-checkpoint-sqlite` with configurable storage backends
-- **Response Caching**: In-memory cache with TTL for LLM response deduplication
+- **Response Caching**: In-memory in development, Redis in production (`CACHE_BACKEND=auto`) — shared across instances with native TTL
 - **Security Pipeline**: Input sanitization, PII masking, and output validation
 - **Observability**: Structured JSON logging, metrics collection, and LangSmith tracing
 
@@ -107,12 +111,17 @@ multi-agents/
 │   ├── db.py                     # Database engine and session management
 │   ├── db_init.py                # Database initialization and seeding
 │   ├── checkpoints.py            # LangGraph checkpoint factory
-│   ├── cache.py                  # Response caching layer
+│   ├── cache.py                  # Response caching (memory dev / Redis production)
+│   ├── ingestion.py              # KB ingestion → Chroma/PGVector + BM25 index
+│   ├── retrieval.py              # Hybrid dense+BM25 retriever with RRF fusion
+│   ├── reranker.py               # LLM relevance reranker (0–10 scoring)
+│   ├── utils.py                  # OpenRouter embeddings wrapper, BM25 tokenizer, ID helpers
 │   ├── security.py               # Input/output security pipeline
 │   ├── monitoring.py             # Logging and metrics
 │   └── data/
 │       ├── orders.json           # Seed data for orders
 │       └── rag_knowledge_base.json  # Sample RAG documents
+├── tests/                        # Unit tests (retrieval, reranker, cache, ingestion)
 ├── main.py                       # Uvicorn entry point
 ├── pyproject.toml
 └── workflow.txt                  # Architecture diagram
@@ -155,6 +164,23 @@ LANGSMITH_PROJECT=multi-agent-system
 CHECKPOINT_STORAGE=sqlite
 CHECKPOINT_PATH=./checkpoints.db
 CHECKPOINT_TABLE=checkpoints
+
+# Cache (Redis is selected automatically when APP_ENV=production)
+CACHE_BACKEND=auto
+REDIS_URL=redis://localhost:6379/0
+
+# Database (PostgreSQL in production; also used by PGVector when enabled)
+DATABASE_URL=sqlite:///./orders.db
+
+# Vector store for RAG embeddings
+USE_PGVECTOR=false
+PGVECTOR_COLLECTION=policy_docs
+
+# RAG pipeline tuning
+RETRIEVAL_TOP_K=10
+RERANK_TOP_K=5
+MAX_RETRIEVAL_RETRIES=1
+INGEST_ON_STARTUP=true
 ```
 
 Key settings in `app/config.py`:
@@ -165,6 +191,12 @@ Key settings in `app/config.py`:
 | `openrouter_api_key` | `""` | OpenRouter API key |
 | `app_env` | `development` | Environment mode |
 | `cache_ttl_seconds` | `300` | Response cache TTL |
+| `cache_backend` | `auto` | Cache backend: `auto`, `memory`, or `redis` |
+| `redis_url` | `redis://localhost:6379/0` | Redis connection URL |
+| `database_url` | `sqlite:///./orders.db` | App database connection string |
+| `use_pgvector` | `false` | Store embeddings via PGVector instead of ChromaDB |
+| `retrieval_top_k` / `rerank_top_k` | `10` / `5` | Retrieval candidates / context kept after reranking |
+| `max_retrieval_retries` | `1` | Max query rewrites on retrieval failure |
 | `checkpoint_storage` | `sqlite` | Checkpoint backend: `memory` or `sqlite` |
 | `checkpoint_path` | `./checkpoints.db` | SQLite checkpoint file path |
 
@@ -239,6 +271,38 @@ curl -X POST "http://127.0.0.1:8000/query" \
 
 See `workflow.txt` for the architecture diagram.
 
+### Policy RAG Pipeline
+
+The Policy RAG agent runs an agentic retrieval loop as a compiled sub-graph:
+
+```
+Contextualize (rewrite follow-up into standalone question)
+    │
+    ▼
+Hybrid Retrieve (dense + BM25 fused via Reciprocal Rank Fusion, k=60)
+    │
+    ▼
+Rerank (LLM scores each chunk 0–10 → top RERANK_TOP_K)
+    │
+    ▼
+Grade Context (SUFFICIENT / PARTIAL / NONE / UNANSWERABLE)
+    │
+    ├─── SUFFICIENT ──► Generate Answer ──► Groundedness Check ──► Return Response
+    │                         │ not grounded
+    │                         ▼
+    │                    Rewrite Query (loop, bounded by MAX_RETRIEVAL_RETRIES)
+    │
+    ├─── PARTIAL ──► Retrieve Complementary (new sources, missing aspects) ──► Rerank → Grade (loop)
+    │
+    ├─── NONE ──► Rewrite Query ──► Hybrid Retrieve → Rerank → Grade (loop)
+    │
+    └─── UNANSWERABLE ──► "I don't have sufficient information..."
+```
+
+- **Ingestion** (`app/ingestion.py`): loads `app/data/rag_knowledge_base.json`, enriches chunks with contextual prefixes, embeds them via the custom OpenRouter embeddings wrapper (`app/utils.py`), and persists to ChromaDB or PGVector plus a pickled BM25 index. Runs at startup when `INGEST_ON_STARTUP=true`.
+- **Retrieval** (`app/retrieval.py`): both retrievers fetch `2 × top_k` candidates before fusion; complementary retrieval excludes already-seen sources for diversity.
+- **Reranking** (`app/reranker.py`): identical queries are cached to avoid re-scoring; LLM failures score 0 and are deprioritized.
+
 ### Query Flow
 
 1. **Supervisor** receives the query, classifies intent, and routes to the appropriate specialist
@@ -270,7 +334,7 @@ The system uses SQLAlchemy with SQLite for persistent storage:
 | Support Ticket | `TKT-XXXXXXXX` | `TKT-B1AD8289` |
 | Refund Request | `REF-XXXXXXXX` | `REF-DE689742` |
 
-To switch to PostgreSQL or MySQL, update `DATABASE_URL` in `app/db.py`.
+The database is driven by `DATABASE_URL` in `.env` — SQLite by default, PostgreSQL in production (also required when `USE_PGVECTOR=true`, with the `vector` extension enabled: `CREATE EXTENSION vector;`).
 
 ## Checkpoints
 
@@ -280,6 +344,15 @@ LangGraph checkpoints enable stateful multi-turn conversations:
 - **SQLite**: Persistent local storage via `langgraph-checkpoint-sqlite`
 
 Configure via `CHECKPOINT_STORAGE`, `CHECKPOINT_PATH`, and `CHECKPOINT_TABLE` in `.env`.
+
+## Caching
+
+Response caching deduplicates identical queries:
+
+- **Memory** (`CACHE_BACKEND=memory`): per-instance dict with TTL (development default)
+- **Redis** (`CACHE_BACKEND=redis`, or `auto` + `APP_ENV=production`): shared across instances, native TTL expiry, survives restarts; falls back to memory with a warning if Redis is unreachable
+
+Inspect hit/miss rates via `GET /cache/stats`.
 
 ## Security
 
@@ -296,8 +369,8 @@ Configure via `CHECKPOINT_STORAGE`, `CHECKPOINT_PATH`, and `CHECKPOINT_TABLE` in
 ## Development
 
 ```bash
-# Run tests
-pytest
+# Run tests (retrieval RRF fusion, reranker, cache, ingestion)
+uv run python -m pytest tests/ -v
 
 # Lint / typecheck
 ruff check .

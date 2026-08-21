@@ -33,7 +33,7 @@ from app.models import (
     StreamEvent, STATUS_MESSAGES,
 )
 from app.security import SecurityPipeline
-from app.cache import ResponseCache
+from app.cache import create_cache
 from app.monitoring import get_logger, MetricsCollector, RequestTimer
 from app.agents.graph import build_graph
 from app.agents.state import AgentState
@@ -95,7 +95,7 @@ def _build_initial_state(body: "QueryRequest", cleaned_message: str, thread_id: 
 
 # === Global instances (initialized in lifespan) ===
 security: SecurityPipeline = None
-cache: ResponseCache = None
+cache = None
 metrics: MetricsCollector = None
 multi_agent_graph = None
 logger = get_logger()
@@ -121,8 +121,17 @@ async def lifespan(app: FastAPI):
 
     # Initialize components
     security = SecurityPipeline()
-    cache = ResponseCache(ttl_seconds=settings.cache_ttl_seconds)
+    cache = create_cache(ttl_seconds=settings.cache_ttl_seconds)
     metrics = MetricsCollector()
+
+    # Ingest RAG corpus (vector store + BM25) if enabled
+    if settings.ingest_on_startup:
+        try:
+            from app.ingestion import get_ingestion_pipeline
+            ingest_result = get_ingestion_pipeline().run()
+            logger.info("rag_ingestion_ready", extra={"extra_data": ingest_result})
+        except Exception as e:
+            logger.error("rag_ingestion_failed", extra={"extra_data": {"error": str(e)}})
 
     checkpointer = await get_checkpointer()
     multi_agent_graph = build_graph(checkpointer=checkpointer)

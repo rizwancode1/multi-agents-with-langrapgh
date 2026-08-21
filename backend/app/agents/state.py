@@ -30,6 +30,11 @@ class AgentState(TypedDict, total=False):
     route: list[dict]
     return_refund_data: dict | None
     messages: list[dict]
+    context_state: str | None
+    missing_aspects: list[str]
+    relevant_sources: list[str]
+    is_grounded: bool | None
+    rag_trace: list[str]
 
 
 def format_history(messages: list[dict] | None) -> str:
