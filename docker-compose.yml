@@ -1,0 +1,45 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: multi-agent-backend
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: production
+      OPEN_ROUTER_API_KEY: ${OPEN_ROUTER_API_KEY:-}
+      OPEN_ROUTER_BASE_URL: ${OPEN_ROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-multi-agent-system}
+      CHECKPOINT_STORAGE: ${CHECKPOINT_STORAGE:-sqlite}
+      CHECKPOINT_PATH: /app/checkpoints.db
+      RATE_LIMIT: ${RATE_LIMIT:-20/minute}
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-300}
+    volumes:
+      - backend_data:/app
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: multi-agent-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://backend:8000}
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  backend_data:

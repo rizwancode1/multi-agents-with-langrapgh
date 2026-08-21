@@ -1,0 +1,11 @@
+.venv
+__pycache__
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+*.png
+.env
+uv.lock
+responses.json
+workflow.txt
