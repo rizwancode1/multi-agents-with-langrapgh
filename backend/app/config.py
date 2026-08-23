@@ -3,10 +3,11 @@ Centralized Configuration
 Uses pydantic-settings for validated environment variables.
 """
 
-from pydantic import Field
-from dotenv import load_dotenv
-from pydantic_settings import BaseSettings
 from functools import lru_cache
+
+from dotenv import load_dotenv
+from pydantic import Field
+from pydantic_settings import BaseSettings
 
 # Load .env into os.environ so LangChain/LangSmith SDK can read tracing config
 load_dotenv()
@@ -17,10 +18,14 @@ class Settings(BaseSettings):
     # openai_api_key: str
 
     primary_model: str = "openrouter/google/gemini-2.0-flash-exp:free"
-    fallback_model: str = "openrouter/google/gemini-2.0-flash-exp:free"
+    # Must differ from primary_model, otherwise with_fallbacks retries the same failing model
+    fallback_model: str = "openrouter/meta-llama/llama-3.3-70b-instruct:free"
     embedding_model: str = "text-embedding-3-small"
     openrouter_api_key: str = Field(default="", validation_alias="OPEN_ROUTER_API_KEY")
     openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1", validation_alias="OPEN_ROUTER_BASE_URL")
+
+    # Optional shared API key. When set, mutating endpoints require header "X-API-Key".
+    api_key: str = Field(default="", validation_alias="API_KEY")
     
     # LangSmith
     langchain_tracing_v2: bool = Field(default=True, validation_alias="LANGSMITH_TRACING")
@@ -35,6 +40,8 @@ class Settings(BaseSettings):
     rate_limit: str = "20/minute"
     cache_ttl_seconds: int = 300
     max_retries: int = 3
+    # Draw the mermaid graph PNG on startup (slow; needs network). Off by default.
+    debug_draw_graph: bool = Field(default=False, validation_alias="DEBUG_DRAW_GRAPH")
     
     # Cache backend: "auto" (redis in production, memory in dev), "memory", or "redis"
     cache_backend: str = Field(default="auto", validation_alias="CACHE_BACKEND")
@@ -42,6 +49,7 @@ class Settings(BaseSettings):
     
     # Database (PostgreSQL in production; also used by PGVector when enabled)
     database_url: str = Field(default="sqlite:///./orders.db", validation_alias="DATABASE_URL")
+    db_echo_logs: bool = Field(default=False, validation_alias="DB_ECHO_LOGS")
     
     # Vector store: opt-in PGVector for embeddings storage (independent of the main DB choice)
     use_pgvector: bool = Field(default=False, validation_alias="USE_PGVECTOR")

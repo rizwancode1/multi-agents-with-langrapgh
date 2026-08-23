@@ -1,20 +1,12 @@
-from app.agents.state import AgentState, AgentName, format_history
+from langchain_core.prompts import ChatPromptTemplate
+
+from app.agents.route_utils import add_route
+from app.agents.state import AgentState, format_history
 from app.config import get_settings
 from app.monitoring import get_logger
-from langchain_core.prompts import ChatPromptTemplate
 
 settings = get_settings()
 logger = get_logger("formatter_agent")
-
-
-def _add_route(state: AgentState, action: str) -> list[dict]:
-    route = list(state.get("route", []))
-    route.append({
-        "agent": "formatter",
-        "action": action,
-        "timestamp": __import__("time").time(),
-    })
-    return route
 
 
 FORMATTER_PROMPT = ChatPromptTemplate.from_messages([
@@ -34,7 +26,7 @@ FORMATTER_PROMPT = ChatPromptTemplate.from_messages([
 
 
 def formatter_node(state: AgentState):
-    from langchain_openai import ChatOpenAI
+    from app.utils import get_chat_llm
 
     query = state["query"]
     history = format_history(state.get("messages", []))
@@ -53,12 +45,7 @@ def formatter_node(state: AgentState):
         "visited_agents": state.get("visited_agents", []),
     }})
 
-    llm = ChatOpenAI(
-        base_url=settings.openrouter_base_url,
-        api_key=settings.openrouter_api_key or "sk-placeholder",
-        model=settings.primary_model,
-        temperature=0,
-    )
+    llm = get_chat_llm()
 
     try:
         chain = FORMATTER_PROMPT | llm
@@ -84,5 +71,5 @@ def formatter_node(state: AgentState):
         "response": response_text,
         "visited_agents": state.get("visited_agents", []) + ["formatter"],
         "handoff_count": state.get("handoff_count", 0),
-        "route": _add_route(state, "format_response"),
+        "route": add_route(state, "formatter", "format_response"),
     }

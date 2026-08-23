@@ -171,6 +171,7 @@ REDIS_URL=redis://localhost:6379/0
 
 # Database (PostgreSQL in production; also used by PGVector when enabled)
 DATABASE_URL=sqlite:///./orders.db
+DB_ECHO_LOGS=false
 
 # Vector store for RAG embeddings
 USE_PGVECTOR=false
@@ -214,6 +215,10 @@ The server starts at `http://127.0.0.1:8000`.
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/query` | Send a query to the multi-agent system |
+| GET | `/tickets` | List agent-created tickets (filters: `status`, `priority`, `email`, `order_id`, `q`; pagination) |
+| GET | `/tickets/stats` | Ticket counts by status and priority |
+| GET | `/tickets/{ticket_id}` | Get a single ticket |
+| PATCH | `/tickets/{ticket_id}` | Update ticket status/priority |
 | GET | `/health` | Health check |
 | GET | `/metrics` | Metrics for monitoring dashboards |
 | GET | `/cache/stats` | Cache performance statistics |

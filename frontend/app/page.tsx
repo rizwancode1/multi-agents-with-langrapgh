@@ -3,27 +3,44 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
-  Archive,
   ArrowUp,
-  Bell,
-  ChevronDown,
-  Clock3,
-  Command,
   FileText,
   Menu,
   Moon,
-  MoreHorizontal,
   Paperclip,
   Plus,
   Sparkles,
   Sun,
-  Tag,
   Zap,
 } from "lucide-react";
 import { useTheme } from "../contexts/ThemeContext";
 import { useConversations } from "../contexts/ConversationContext";
 import type { Message, Thread } from "../contexts/ConversationContext";
 import { Avatar } from "../components/common/Avatar";
+import { Markdown } from "../components/common/Markdown";
+import { TypingDots } from "../components/common/TypingDots";
+import { TicketList } from "../components/tickets/TicketList";
+import { TicketStatsStrip } from "../components/tickets/TicketStatsStrip";
+
+// Friendly progress phrases for graph agents and RAG sub-nodes.
+// Never expose raw node names in the UI.
+const AGENT_STATUS_LABELS: Record<string, string> = {
+  router: "Understanding your request…",
+  initial_router: "Understanding your request…",
+  order: "Looking up your order…",
+  policy_rag: "Searching the knowledge base…",
+  support_ticket: "Working on your ticket…",
+  return_refund: "Checking refund eligibility…",
+  evaluator: "Reviewing the answer…",
+  formatter: "Writing the reply…",
+  contextualize: "Re-reading the conversation…",
+  hybrid_retrieve: "Gathering information…",
+  retrieve_complementary: "Gathering more context…",
+  rerank: "Picking the most relevant info…",
+  grade_context: "Checking the facts…",
+  generate: "Composing an answer…",
+  groundedness_check: "Verifying the answer…",
+};
 
 export default function Page() {
   const queryClient = useQueryClient();
@@ -33,7 +50,10 @@ export default function Page() {
 
   const [draft, setDraft] = useState("");
   const [isSending, setIsSending] = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const [pendingAssistantId, setPendingAssistantId] = useState<
+    string | number | null
+  >(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef(0);
   const messageSeqRef = useRef(0);
@@ -60,9 +80,12 @@ export default function Page() {
     );
   }
 
+  // Scroll target container directly without affecting viewport layout
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [active?.messages?.length, isSending]);
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+    }
+  }, [active?.messages, isSending]);
 
   useEffect(() => {
     return () => {
@@ -107,10 +130,11 @@ export default function Page() {
     const statusMessage: Message = {
       id: `a-${++messageSeqRef.current}`,
       role: "assistant",
-      text: "Processing your request...",
+      text: "",
       time: "Just now",
-      status: "Thinking...",
+      status: "Understanding your request…",
     };
+    setPendingAssistantId(statusMessage.id!);
     queryClient.setQueryData<Thread[]>(["conversations"], (old = []) =>
       old.map((thread) =>
         thread.id === active.id
@@ -146,8 +170,10 @@ export default function Page() {
         });
         const data = await fallback.json();
         const answer = data?.response || data?.answer || "Done";
+        setPendingAssistantId(null);
         updateAssistantMessage(active.id, statusMessage.id!, { text: answer });
         queryClient.invalidateQueries({ queryKey: ["conversations"] });
+        queryClient.invalidateQueries({ queryKey: ["tickets"] });
         return;
       }
 
@@ -173,23 +199,24 @@ export default function Page() {
             continue;
           }
 
-          if (event.type === "status") {
+          if (event.type === "status" || event.type === "step") {
             updateAssistantMessage(active.id, statusMessage.id!, {
-              text: event.message || "Processing...",
-              status: event.agent,
-            });
-          } else if (event.type === "step") {
-            updateAssistantMessage(active.id, statusMessage.id!, {
-              text: event.message || `Step: ${event.agent}`,
-              status: event.agent,
+              text: "",
+              status:
+                AGENT_STATUS_LABELS[event.agent] ??
+                event.message ??
+                "Working on it…",
             });
           } else if (event.type === "done") {
             isDone = true;
+            setPendingAssistantId(null);
             const finalText = event.response || "Done";
             updateAssistantMessage(active.id, statusMessage.id!, { text: finalText });
             queryClient.invalidateQueries({ queryKey: ["conversations"] });
+            queryClient.invalidateQueries({ queryKey: ["tickets"] });
           } else if (event.type === "error") {
             isDone = true;
+            setPendingAssistantId(null);
             updateAssistantMessage(active.id, statusMessage.id!, {
               text: "Something went wrong. Please try again.",
             });
@@ -198,15 +225,18 @@ export default function Page() {
       }
 
       if (!isDone && requestIdRef.current === requestId) {
+        setPendingAssistantId(null);
         updateAssistantMessage(active.id, statusMessage.id!, {
           text: "The response was interrupted. Please try again.",
           status: "Interrupted",
         });
       }
     } catch (err) {
+      setPendingAssistantId(null);
       if (requestIdRef.current === requestId && (err as any)?.name !== "AbortError") {
         updateAssistantMessage(active.id, statusMessage.id!, {
-          text: "Thanks for the context. I've captured this request and routed it to the right team for review.",
+          text: "Something went wrong while reaching the assistant. Please try again.",
+          status: "Error",
         });
       }
     } finally {
@@ -218,8 +248,8 @@ export default function Page() {
 
   if (isLoading) {
     return (
-      <main className="aurora-shell min-h-dvh text-foreground flex-1">
-        <div className="flex min-h-dvh items-center justify-center">
+      <main className="aurora-shell h-screen max-h-screen min-w-0 flex-1 overflow-hidden">
+        <div className="flex h-full items-center justify-center">
           <p className="text-sm text-muted-foreground">Loading conversations...</p>
         </div>
       </main>
@@ -228,13 +258,13 @@ export default function Page() {
 
   if (!active) {
     return (
-      <main className="aurora-shell min-h-dvh text-foreground flex-1">
-        <div className="flex min-h-dvh flex-col items-center justify-center gap-4">
+      <main className="aurora-shell h-screen max-h-screen min-w-0 flex-1 overflow-hidden">
+        <div className="flex h-full flex-col items-center justify-center gap-4">
           <div className="mb-2 flex size-12 items-center justify-center rounded-2xl bg-accent text-primary">
             <Sparkles className="size-5" />
           </div>
           <h1 className="text-xl font-semibold tracking-tight">No conversations yet</h1>
-          <p className="max-w-sm text-sm leading-6 text-muted-foreground text-center">
+          <p className="max-w-sm text-center text-sm leading-6 text-muted-foreground">
             Start a new conversation to get help with orders, refunds, policies, and more.
           </p>
           <button
@@ -245,7 +275,7 @@ export default function Page() {
                 status: "Open",
               })
             }
-            className="mt-2 flex h-10 items-center justify-center gap-2 rounded-lg bg-primary text-sm font-medium text-primary-foreground shadow-sm transition hover:opacity-90"
+            className="mt-2 flex h-10 items-center justify-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm transition hover:opacity-90"
           >
             <Plus className="size-4" /> New conversation
           </button>
@@ -255,9 +285,10 @@ export default function Page() {
   }
 
   return (
-    <main className="aurora-shell min-h-dvh text-foreground flex-1">
-      <section className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-18 items-center justify-between aurora-surface border-b border-border/70 bg-background/35 px-4 backdrop-blur-xl md:px-8">
+    <main className="aurora-shell h-screen max-h-screen min-w-0 flex-1 overflow-hidden">
+      <section className="flex h-full max-h-full min-w-0 flex-1 flex-col overflow-hidden">
+        {/* Header */}
+        <header className="flex h-18 shrink-0 items-center justify-between border-b border-border/70 bg-background/35 px-4 backdrop-blur-xl md:px-8">
           <div className="flex items-center gap-3">
             <button
               aria-label="Open navigation"
@@ -282,10 +313,6 @@ export default function Page() {
             </div>
           </div>
           <div className="flex items-center gap-1">
-            <button className="hidden items-center gap-2 rounded-lg border border-input px-3 py-2 text-xs text-muted-foreground hover:bg-accent md:flex">
-              <Command className="size-3.5" /> Search{" "}
-              <kbd className="rounded border border-border px-1">K</kbd>
-            </button>
             <button
               aria-label={`Theme: ${theme}. Click to change theme`}
               title={`Theme: ${theme}`}
@@ -300,23 +327,15 @@ export default function Page() {
                 <Sparkles className="size-4" />
               )}
             </button>
-            <button
-              aria-label="Notifications"
-              className="rounded-lg p-2 text-muted-foreground hover:bg-accent hover:text-foreground"
-            >
-              <Bell className="size-4" />
-            </button>
-            <button
-              aria-label="More actions"
-              className="rounded-lg p-2 text-muted-foreground hover:bg-accent hover:text-foreground"
-            >
-              <MoreHorizontal className="size-4" />
-            </button>
           </div>
         </header>
-        <div className="flex min-h-0 flex-1 overflow-y-auto flex-col xl:flex-row">
-          <div className="flex min-w-0 flex-1 flex-col">
-            <div className="flex items-center justify-between border-b border-border px-4 py-4 md:px-8">
+
+        {/* Outer Grid/Flex Section */}
+        <div className="flex min-h-0 flex-1 overflow-hidden xl:flex-row">
+          {/* Main Chat Column */}
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+            {/* Customer Header */}
+            <div className="flex shrink-0 items-center justify-between border-b border-border px-4 py-4 md:px-8">
               <div className="flex items-center gap-3">
                 <Avatar
                   name={active.customer === "Unassigned" ? "New" : active.customer}
@@ -333,12 +352,14 @@ export default function Page() {
                   <span className="mr-1.5 mt-0.5 size-1.5 rounded-full bg-signal" />
                   {active.status}
                 </span>
-                <button className="rounded-lg border border-input p-2 text-muted-foreground hover:bg-accent">
-                  <Archive className="size-4" />
-                </button>
               </div>
             </div>
-            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-6 md:px-8 md:py-8">
+
+            {/* Scrollable Messages Container */}
+            <div
+              ref={scrollContainerRef}
+              className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-6 md:px-8 md:py-8"
+            >
               <div className="mx-auto flex w-full max-w-3xl flex-col gap-7">
                 {active.messages.length === 0 && (
                   <div className="flex flex-1 flex-col items-center justify-center py-20 text-center">
@@ -356,7 +377,7 @@ export default function Page() {
                 )}
                 {active.messages.map((message, index) => (
                   <div
-                    key={`${message.time}-${index}`}
+                    key={message.id ?? `msg-${index}`}
                     className={`flex gap-3 ${message.role === "user" ? "justify-end" : ""}`}
                   >
                     {message.role === "assistant" && (
@@ -370,10 +391,23 @@ export default function Page() {
                       <div
                         className={`rounded-2xl px-4 py-3 text-sm leading-6 ${message.role === "user" ? "rounded-br-md bg-primary text-primary-foreground" : "rounded-bl-md border border-border bg-card text-card-foreground shadow-sm"}`}
                       >
-                        {message.text}
+                        {message.role === "assistant" ? (
+                          isSending && message.id === pendingAssistantId ? (
+                            <TypingDots />
+                          ) : (
+                            <Markdown>{message.text}</Markdown>
+                          )
+                        ) : (
+                          message.text
+                        )}
                       </div>
                       {message.status && (
-                        <p className="mt-1 text-[11px] text-muted-foreground">
+                        <p
+                          className={`mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground ${isSending && message.id === pendingAssistantId ? "animate-pulse" : ""}`}
+                        >
+                          {isSending && message.id === pendingAssistantId && (
+                            <span className="size-1 rounded-full bg-signal" />
+                          )}
                           {message.status}
                         </p>
                       )}
@@ -385,14 +419,15 @@ export default function Page() {
                       </p>
                     </div>
                     {message.role === "user" && (
-                      <Avatar name="Jordan Lee" tone="bg-primary" />
+                      <Avatar name={active.customer === "Unassigned" ? "You" : active.customer} tone="bg-primary" />
                     )}
                   </div>
                 ))}
-                <div ref={bottomRef} />
               </div>
             </div>
-            <div className="border-t border-border/70 bg-transparent px-4 py-4 md:px-8 md:py-5">
+
+            {/* Bottom Composer */}
+            <div className="shrink-0 border-t border-border/70 bg-background/50 px-4 py-4 backdrop-blur-md md:px-8 md:py-5">
               <div className="mx-auto max-w-3xl">
                 <div className="mb-3 flex gap-2 overflow-x-auto pb-1">
                   <button
@@ -468,56 +503,25 @@ export default function Page() {
               </div>
             </div>
           </div>
-          <aside className="hidden w-75 shrink-0 border-l border-border aurora-surface bg-sidebar/22 p-6 xl:block">
+
+          {/* Right Sidebar */}
+          <aside className="hidden w-75 shrink-0 overflow-y-auto border-l border-border aurora-surface bg-sidebar/22 p-6 xl:block">
             <div className="flex items-center justify-between">
               <p className="text-xs font-semibold uppercase tracking-[0.13em] text-muted-foreground">
-                Ticket context
+                Live tickets
               </p>
-              <button className="text-muted-foreground hover:text-foreground">
-                <MoreHorizontal className="size-4" />
-              </button>
+              <span className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                <span className="size-1.5 animate-pulse rounded-full bg-signal" />
+                Auto-updating
+              </span>
             </div>
             <div className="mt-5 flex flex-col gap-5">
+              <TicketStatsStrip />
               <div>
-                <p className="text-xs text-muted-foreground">Status</p>
-                <div className="mt-2 flex items-center gap-2 text-sm font-medium">
-                  <span className="size-2 rounded-full bg-signal" />{" "}
-                  {active.status}
-                  <ChevronDown className="ml-auto size-4 text-muted-foreground" />
-                </div>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground">Priority</p>
-                <p className="mt-2 text-sm font-medium">High</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground">Tags</p>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  <span className="inline-flex items-center gap-1 rounded-md bg-accent px-2 py-1 text-xs text-muted-foreground">
-                    <Tag className="size-3" /> Billing
-                  </span>
-                  <span className="rounded-md bg-accent px-2 py-1 text-xs text-muted-foreground">
-                    Duplicate charge
-                  </span>
-                </div>
-              </div>
-              <div className="border-t border-border pt-5">
-                <p className="text-xs text-muted-foreground">Assigned agent</p>
-                <div className="mt-3 flex items-center gap-3">
-                  <Avatar name="Jordan Lee" tone="bg-primary" />
-                  <div>
-                    <p className="text-sm font-medium">Jordan Lee</p>
-                    <p className="text-xs text-muted-foreground">
-                      Support lead
-                    </p>
-                  </div>
-                </div>
-              </div>
-              <div className="border-t border-border pt-5">
-                <p className="text-xs text-muted-foreground">SLA</p>
-                <div className="mt-2 flex items-center gap-2 text-sm font-medium">
-                  <Clock3 className="size-4 text-signal" /> Respond within 2h
-                </div>
+                <p className="mb-3 text-xs text-muted-foreground">
+                  Generated by Relay agents
+                </p>
+                <TicketList compact limit={8} />
               </div>
             </div>
           </aside>

@@ -10,17 +10,17 @@ Vector backend is selected by USE_PGVECTOR:
 BM25 always persists locally as a pickle alongside the vector index.
 """
 
+import hashlib
 import json
 import pickle
 from pathlib import Path
-from typing import List, Optional
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.config import get_settings
 from app.monitoring import get_logger
-from app.utils import embeddings, generate_stable_id, bm25_tokenize
+from app.utils import bm25_tokenize, embeddings, generate_stable_id
 
 logger = get_logger("ingestion")
 
@@ -57,7 +57,7 @@ class IngestionPipeline:
 
     # === Loading ===
 
-    def load_kb_documents(self) -> List[Document]:
+    def load_kb_documents(self) -> list[Document]:
         """Load the JSON knowledge base into enriched Documents."""
         if not self.kb_path.exists():
             raise FileNotFoundError(f"Knowledge base not found: {self.kb_path}")
@@ -65,7 +65,7 @@ class IngestionPipeline:
         with open(self.kb_path, "r", encoding="utf-8") as f:
             entries = json.load(f)
 
-        documents: List[Document] = []
+        documents: list[Document] = []
         for entry in entries:
             content = entry.get("content", "")
             title = entry.get("title", "")
@@ -98,9 +98,9 @@ class IngestionPipeline:
             )
         return documents
 
-    def chunk_documents(self, documents: List[Document]) -> List[Document]:
+    def chunk_documents(self, documents: list[Document]) -> list[Document]:
         """Split documents into overlapping chunks with stable chunk IDs."""
-        chunks: List[Document] = []
+        chunks: list[Document] = []
         for doc in documents:
             split_docs = self.text_splitter.create_documents(
                 [doc.page_content],
@@ -116,7 +116,7 @@ class IngestionPipeline:
 
     # === Vector store ===
 
-    def build_vector_store(self, chunks: List[Document]):
+    def build_vector_store(self, chunks: list[Document]):
         """Create / upsert chunks into the configured vector store."""
         if self.use_pgvector:
             from langchain_postgres import PGVector
@@ -132,6 +132,16 @@ class IngestionPipeline:
             from langchain_chroma import Chroma
 
             self.persist_dir.mkdir(parents=True, exist_ok=True)
+            # Drop any previous version of this collection so a rebuild never
+            # accumulates duplicates next to stale chunks.
+            try:
+                Chroma(
+                    embedding_function=embeddings,
+                    persist_directory=str(self.persist_dir),
+                    collection_name=self.collection_name,
+                ).delete_collection()
+            except Exception:
+                pass  # First run / nothing to clean
             self.vector_store = Chroma.from_documents(
                 documents=chunks,
                 embedding=embeddings,
@@ -164,7 +174,7 @@ class IngestionPipeline:
 
     # === BM25 ===
 
-    def build_bm25_index(self, chunks: List[Document]) -> dict:
+    def build_bm25_index(self, chunks: list[Document]) -> dict:
         """Build a BM25 index and persist it as pickle."""
         try:
             from rank_bm25 import BM25Okapi
@@ -192,6 +202,10 @@ class IngestionPipeline:
 
     # === Pipeline ===
 
+    def _kb_hash(self) -> str:
+        """SHA-256 of the knowledge-base file so edits invalidate the index."""
+        return hashlib.sha256(self.kb_path.read_bytes()).hexdigest()
+
     def _write_manifest(self, document_count: int) -> None:
         self.manifest_path.write_text(
             json.dumps({
@@ -200,6 +214,7 @@ class IngestionPipeline:
                 "collection": self.collection_name,
                 "embedding_model": self.settings.embedding_model,
                 "documents": document_count,
+                "kb_hash": self._kb_hash(),
             }),
             encoding="utf-8",
         )
@@ -212,14 +227,24 @@ class IngestionPipeline:
         bm25_exists = self.bm25_index_path.exists()
 
         if not force_rebuild and manifest_exists and bm25_exists:
-            self.load_vector_store()
-            bm25_payload = self.load_bm25_index()
-            return {
-                "status": "loaded",
-                "vector_store": "existing",
-                "bm25_index": "existing",
-                "documents": len(bm25_payload.get("docs", [])),
-            }
+            # Rebuild automatically when the KB content changed since the last
+            # ingestion (previously stale indexes were served forever).
+            try:
+                manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+                kb_unchanged = manifest.get("kb_hash") == self._kb_hash()
+            except Exception:
+                kb_unchanged = False
+
+            if kb_unchanged:
+                self.load_vector_store()
+                bm25_payload = self.load_bm25_index()
+                return {
+                    "status": "loaded",
+                    "vector_store": "existing",
+                    "bm25_index": "existing",
+                    "documents": len(bm25_payload.get("docs", [])),
+                }
+            logger.info("rag_kb_changed_rebuilding", extra={"extra_data": {}})
 
         documents = self.load_kb_documents()
         chunks = self.chunk_documents(documents)
@@ -242,7 +267,7 @@ class IngestionPipeline:
 
 
 # Module-level singleton (lazy-initialized on first use)
-_pipeline: Optional[IngestionPipeline] = None
+_pipeline: IngestionPipeline | None = None
 
 
 def get_ingestion_pipeline() -> IngestionPipeline:

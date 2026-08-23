@@ -14,18 +14,18 @@ topology (router -> agents -> evaluator -> formatter) stays unchanged.
 
 import time
 from functools import lru_cache
-from typing import Annotated, Any, Dict, List
+from typing import Any
 
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import BaseMessage
-from langchain_openai import ChatOpenAI
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
+from app.agents.route_utils import add_route
 from app.agents.state import AgentState
 from app.config import get_settings
 from app.monitoring import get_logger
+from app.utils import get_chat_llm
 
 settings = get_settings()
 logger = get_logger("rag_agent")
@@ -37,17 +37,21 @@ class RagState(TypedDict):
     question: str
     chat_history: str
     rewritten_question: str
-    context: List[Document]
+    context: list[Document]
     answer: str
     context_state: str
-    relevant_sources: List[str]
-    missing_aspects: List[str]
+    relevant_sources: list[str]
+    missing_aspects: list[str]
     is_grounded: bool
     retry_count: int
+    # Number of complementary-retrieval rounds already run. The PARTIAL branch
+    # of grade_context used to loop forever on repeated PARTIAL grades because
+    # nothing incremented or checked a bound.
+    complementary_count: int
     max_retries: int
     model_used: str
-    node_latencies: Dict[str, float]
-    trace: List[str]
+    node_latencies: dict[str, float]
+    trace: list[str]
 
 
 # === Prompts (verbatim from production-rag-api) ===
@@ -130,13 +134,8 @@ Rewritten question:"""
 # === Lazy singletons ===
 
 @lru_cache(maxsize=1)
-def _get_llm() -> ChatOpenAI:
-    return ChatOpenAI(
-        base_url=settings.openrouter_base_url,
-        api_key=settings.openrouter_api_key or "sk-placeholder",
-        model=settings.primary_model,
-        temperature=0,
-    )
+def _get_llm():
+    return get_chat_llm()
 
 
 @lru_cache(maxsize=1)
@@ -151,15 +150,48 @@ def _get_reranker():
     return LLMReranker()
 
 
-def _context_text(docs: List[Document]) -> str:
+def _context_text(docs: list[Document]) -> str:
     return "\n\n".join(doc.page_content for doc in docs)
 
 
 # === Sub-graph builder ===
 
+# === Routing (module-level & pure for testability) ===
+
+MAX_COMPLEMENTARY_ROUNDS = 1
+
+
+def route_after_grade_context(state: RagState) -> str:
+    ctx_state = state.get("context_state", "NONE")
+    if ctx_state == "SUFFICIENT":
+        return "generate"
+    if ctx_state == "PARTIAL":
+        # Bounded: after one complementary round, generate from the best
+        # available evidence instead of looping PARTIAL forever.
+        if state.get("complementary_count", 0) < MAX_COMPLEMENTARY_ROUNDS:
+            return "retrieve_complementary"
+        return "generate"
+    if ctx_state == "NONE":
+        if state.get("retry_count", 0) < settings.max_retrieval_retries:
+            return "rewrite"
+        return "no_answer"
+    return "no_answer"
+
+
+def route_after_rewrite(state: RagState) -> str:
+    return "hybrid_retrieve"
+
+
+def route_after_answer_eval(state: RagState) -> str:
+    if state.get("is_grounded"):
+        return "end"
+    if state.get("retry_count", 0) < settings.max_retrieval_retries:
+        return "rewrite"
+    return "no_answer"
+
+
 def build_rag_subgraph():
     llm = _get_llm()
-    max_rewrites = settings.max_retrieval_retries
 
     def _record_latency(state: RagState, node_name: str, fn):
         start = time.perf_counter()
@@ -171,7 +203,7 @@ def build_rag_subgraph():
         trace.append(f"{node_name}:{round(elapsed_ms, 2)}ms")
         return result, latencies, trace
 
-    def contextualize(state: RagState) -> Dict[str, Any]:
+    def contextualize(state: RagState) -> dict[str, Any]:
         def _run():
             history = state.get("chat_history", "")
             question = state["question"]
@@ -188,7 +220,7 @@ def build_rag_subgraph():
         result, latencies, trace = _record_latency(state, "contextualize", _run)
         return {**result, "node_latencies": latencies, "trace": trace}
 
-    def hybrid_retrieve(state: RagState) -> Dict[str, Any]:
+    def hybrid_retrieve(state: RagState) -> dict[str, Any]:
         def _run():
             question = state.get("rewritten_question") or state["question"]
             preserve_sources = state.get("relevant_sources", [])
@@ -201,7 +233,7 @@ def build_rag_subgraph():
         result, latencies, trace = _record_latency(state, "hybrid_retrieve", _run)
         return {**result, "node_latencies": latencies, "trace": trace}
 
-    def rerank(state: RagState) -> Dict[str, Any]:
+    def rerank(state: RagState) -> dict[str, Any]:
         def _run():
             question = state.get("rewritten_question") or state["question"]
             docs = state.get("context", [])
@@ -211,7 +243,7 @@ def build_rag_subgraph():
         result, latencies, trace = _record_latency(state, "rerank", _run)
         return {**result, "node_latencies": latencies, "trace": trace}
 
-    def grade_context(state: RagState) -> Dict[str, Any]:
+    def grade_context(state: RagState) -> dict[str, Any]:
         def _run():
             question = state["question"]
             docs = state.get("context", [])
@@ -233,8 +265,8 @@ def build_rag_subgraph():
             }).content.strip()
 
             state_name = "NONE"
-            sources: List[str] = []
-            missing: List[str] = []
+            sources: list[str] = []
+            missing: list[str] = []
 
             for line in resp.splitlines():
                 line = line.strip()
@@ -261,7 +293,7 @@ def build_rag_subgraph():
         result, latencies, trace = _record_latency(state, "grade_context", _run)
         return {**result, "node_latencies": latencies, "trace": trace}
 
-    def retrieve_complementary(state: RagState) -> Dict[str, Any]:
+    def retrieve_complementary(state: RagState) -> dict[str, Any]:
         def _run():
             question = state.get("rewritten_question") or state["question"]
             missing = state.get("missing_aspects", [])
@@ -280,12 +312,15 @@ def build_rag_subgraph():
                 d for d in docs
                 if (d.metadata.get("chunk_id") or id(d)) not in seen_ids
             ]
-            return {"context": combined}
+            return {
+                "context": combined,
+                "complementary_count": state.get("complementary_count", 0) + 1,
+            }
 
         result, latencies, trace = _record_latency(state, "retrieve_complementary", _run)
         return {**result, "node_latencies": latencies, "trace": trace}
 
-    def rewrite_query(state: RagState) -> Dict[str, Any]:
+    def rewrite_query(state: RagState) -> dict[str, Any]:
         def _run():
             question = state["question"]
             chain = REWRITE_PROMPT | llm
@@ -298,7 +333,7 @@ def build_rag_subgraph():
         result, latencies, trace = _record_latency(state, "rewrite_query", _run)
         return {**result, "node_latencies": latencies, "trace": trace}
 
-    def generate_answer(state: RagState) -> Dict[str, Any]:
+    def generate_answer(state: RagState) -> dict[str, Any]:
         def _run():
             question = state["question"]
             docs = state.get("context", [])
@@ -312,7 +347,7 @@ def build_rag_subgraph():
         result, latencies, trace = _record_latency(state, "generate", _run)
         return {**result, "node_latencies": latencies, "trace": trace}
 
-    def groundedness_check(state: RagState) -> Dict[str, Any]:
+    def groundedness_check(state: RagState) -> dict[str, Any]:
         def _run():
             docs = state.get("context", [])
             chain = GROUNDEDNESS_PROMPT | llm
@@ -325,36 +360,12 @@ def build_rag_subgraph():
         result, latencies, trace = _record_latency(state, "groundedness_check", _run)
         return {**result, "node_latencies": latencies, "trace": trace}
 
-    def handle_no_answer(state: RagState) -> Dict[str, Any]:
+    def handle_no_answer(state: RagState) -> dict[str, Any]:
         return {
             "answer": "I don't have sufficient information in the provided documents to answer that.",
             "model_used": "no_answer",
             "context_state": "UNANSWERABLE",
         }
-
-    # --- Routing ---
-
-    def route_after_grade_context(state: RagState) -> str:
-        ctx_state = state.get("context_state", "NONE")
-        if ctx_state == "SUFFICIENT":
-            return "generate"
-        if ctx_state == "PARTIAL":
-            return "retrieve_complementary"
-        if ctx_state == "NONE":
-            if state["retry_count"] < max_rewrites:
-                return "rewrite"
-            return "no_answer"
-        return "no_answer"
-
-    def route_after_rewrite(state: RagState) -> str:
-        return "hybrid_retrieve"
-
-    def route_after_answer_eval(state: RagState) -> str:
-        if state.get("is_grounded"):
-            return "end"
-        if state["retry_count"] < max_rewrites:
-            return "rewrite"
-        return "no_answer"
 
     # --- Build Graph ---
 
@@ -418,16 +429,6 @@ def get_rag_subgraph():
 
 # === Outer multi-agent node ===
 
-def _add_route(state: AgentState, action: str) -> list[dict]:
-    route = list(state.get("route", []))
-    route.append({
-        "agent": "rag",
-        "action": action,
-        "timestamp": time.time(),
-    })
-    return route
-
-
 def rag_node(state: AgentState):
     query = state["query"]
 
@@ -445,6 +446,7 @@ def rag_node(state: AgentState):
         "missing_aspects": [],
         "is_grounded": False,
         "retry_count": 0,
+        "complementary_count": 0,
         "max_retries": settings.max_retrieval_retries,
         "model_used": "",
         "node_latencies": {},
@@ -466,7 +468,7 @@ def rag_node(state: AgentState):
             "trace": [],
         }
 
-    documents: List[Document] = result.get("context", [])
+    documents: list[Document] = result.get("context", [])
 
     retrieved_documents = [
         {
@@ -501,5 +503,5 @@ def rag_node(state: AgentState):
         "next_agent": "evaluator",
         "visited_agents": state.get("visited_agents", []) + ["rag"],
         "handoff_count": state.get("handoff_count", 0),
-        "route": _add_route(state, "agentic_rag"),
+        "route": add_route(state, "rag", "agentic_rag"),
     }

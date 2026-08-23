@@ -1,9 +1,10 @@
-from pydantic import BaseModel, Field
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel
 
-from app.agents.state import AgentState, AgentName, format_history
+from app.agents.route_utils import add_route
+from app.agents.state import AgentName, AgentState, format_history
 from app.config import get_settings
 from app.monitoring import get_logger
-from langchain_core.prompts import ChatPromptTemplate
 
 settings = get_settings()
 logger = get_logger("evaluator_agent")
@@ -22,6 +23,9 @@ class EvaluationResult(BaseModel):
 
 
 def _safe_default_evaluation() -> dict:
+    # Fail-OPEN so an evaluator outage never blocks users, but the result is
+    # explicitly flagged (evaluation_available=False + metric) instead of the
+    # previous silent pass.
     return {
         "passed": True,
         "grounded": True,
@@ -32,17 +36,8 @@ def _safe_default_evaluation() -> dict:
         "missing_information": [],
         "recommended_agent": None,
         "reason": "Evaluation unavailable; passing by default.",
+        "evaluation_available": False,
     }
-
-
-def _add_route(state: AgentState, action: str) -> list[dict]:
-    route = list(state.get("route", []))
-    route.append({
-        "agent": "evaluator",
-        "action": action,
-        "timestamp": __import__("time").time(),
-    })
-    return route
 
 
 EVALUATOR_PROMPT = ChatPromptTemplate.from_messages([
@@ -76,7 +71,7 @@ EVALUATOR_PROMPT = ChatPromptTemplate.from_messages([
 
 
 def evaluator_node(state: AgentState):
-    from langchain_openai import ChatOpenAI
+    from app.utils import get_chat_llm
 
     query = state.get("query", "")
     intents = state.get("intents") or []
@@ -90,14 +85,7 @@ def evaluator_node(state: AgentState):
     handoff_reason = state.get("handoff_reason", "")
     retry_count = state.get("handoff_count", 0)
 
-    llm = ChatOpenAI(
-        base_url=settings.openrouter_base_url,
-        api_key=settings.openrouter_api_key or "sk-placeholder",
-        model=settings.primary_model,
-        temperature=0,
-    )
-
-    evaluator_llm = llm.with_structured_output(EvaluationResult)
+    evaluator_llm = get_chat_llm(schema=EvaluationResult)
 
     try:
         chain = EVALUATOR_PROMPT | evaluator_llm
@@ -125,9 +113,12 @@ def evaluator_node(state: AgentState):
         }})
     except Exception as e:
         evaluation = _safe_default_evaluation()
-        logger.error("evaluator_exception", extra={"extra_data": {
+        from app.monitoring import get_metrics
+        get_metrics().record_request(latency_ms=0, error=True)
+        logger.error("evaluator_exception_fail_open", extra={"extra_data": {
             "query": query[:200],
             "error": str(e),
+            "evaluation_available": False,
         }})
 
     if not evaluation.get("passed", True):
@@ -146,18 +137,28 @@ def evaluator_node(state: AgentState):
         "evaluation": evaluation,
         "next_agent": evaluation.get("recommended_agent") if not evaluation.get("passed", True) else None,
         "handoff_reason": evaluation.get("reason", ""),
-        "route": _add_route(state, action),
+        "route": add_route(state, "evaluator", action),
     }
 
 
 def evaluator_router(state: AgentState):
+    from app.agents.graph import MAX_HANDOFFS_PER_REQUEST, MAX_VISITS_PER_AGENT
+
     evaluation = state["evaluation"]
 
     if evaluation.get("passed", True):
         return "formatter"
 
     retry_agent = evaluation.get("recommended_agent")
-    if retry_agent:
-        return retry_agent
+    if not retry_agent:
+        return "end"
 
-    return "end"
+    # Same safety caps as agent_router: never bounce to an agent that has
+    # already been tried too many times, or once the handoff budget is spent.
+    visited = state.get("visited_agents", [])
+    if sum(1 for a in visited if a == retry_agent) >= MAX_VISITS_PER_AGENT:
+        return "formatter"
+    if state.get("handoff_count", 0) >= MAX_HANDOFFS_PER_REQUEST:
+        return "formatter"
+
+    return retry_agent

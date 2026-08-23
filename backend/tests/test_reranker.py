@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
 
 from app.reranker import LLMReranker
 
@@ -21,9 +22,7 @@ def make_reranker(responses) -> LLMReranker:
     r = object.__new__(LLMReranker)
     r.settings = None
     r.llm = FakeLLM(responses)
-    r.prompt = LLMReranker.__dict__ is None  # placeholder, replaced below
-    from langchain_core.prompts import ChatPromptTemplate
-    r.prompt = ChatPromptTemplate.from_template("{question} {context}")
+    r.prompt = ChatPromptTemplate.from_template("{question} {chunks}")
     r._cache = {}
     return r
 
@@ -34,7 +33,7 @@ def test_rerank_sorts_by_score_and_clamps():
         Document(page_content="high", metadata={"chunk_id": "d2"}),
         Document(page_content="mid", metadata={"chunk_id": "d3"}),
     ]
-    r = make_reranker(["2", "9", "5"])
+    r = make_reranker(["1: 2\n2: 9\n3: 5"])
 
     result = r.rerank("q", docs, top_k=3)
 
@@ -43,22 +42,31 @@ def test_rerank_sorts_by_score_and_clamps():
     assert [doc.metadata["rerank_score"] for doc in result] == [9.0, 5.0, 2.0]
 
 
+def test_rerank_single_batch_call():
+    docs = [
+        Document(page_content="a", metadata={"chunk_id": "d1"}),
+        Document(page_content="b", metadata={"chunk_id": "d2"}),
+    ]
+    r = make_reranker(["1: 3\n2: 4"])
+    r.rerank("q", docs, top_k=2)
+    assert r.llm.calls == 1
+
+
 def test_rerank_failure_scores_zero():
     docs = [
         Document(page_content="bad", metadata={"chunk_id": "d1"}),
         Document(page_content="good", metadata={"chunk_id": "d2"}),
     ]
-    r = make_reranker(["not-a-number", "7"])
+    r = make_reranker(["completely unparseable response"])
 
     result = r.rerank("q", docs, top_k=2)
 
-    assert result[0].metadata["chunk_id"] == "d2"
-    assert result[1].metadata["rerank_score"] == 0.0
+    assert [doc.metadata["rerank_score"] for doc in result] == [0.0, 0.0]
 
 
 def test_rerank_uses_cache_for_identical_query():
     docs = [Document(page_content="x", metadata={"chunk_id": "d1"})]
-    r = make_reranker(["8"])
+    r = make_reranker(["1: 8"])
 
     first = r.rerank("same question", docs, top_k=1)
     second = r.rerank("same question", docs, top_k=1)

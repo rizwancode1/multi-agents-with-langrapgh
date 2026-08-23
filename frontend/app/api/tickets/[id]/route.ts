@@ -1,9 +1,12 @@
 import { NextResponse } from 'next/server'
-import { BACKEND_URL, backendHeaders } from '../../../lib/backend'
+import { BACKEND_URL, backendHeaders } from '../../../../lib/backend'
 
-export async function GET() {
+type Params = { params: Promise<{ id: string }> }
+
+export async function GET(_request: Request, { params }: Params) {
   try {
-    const res = await fetch(`${BACKEND_URL}/conversations`, {
+    const { id } = await params
+    const res = await fetch(`${BACKEND_URL}/tickets/${encodeURIComponent(id)}`, {
       cache: 'no-store',
       headers: backendHeaders(),
     })
@@ -17,11 +20,12 @@ export async function GET() {
   }
 }
 
-export async function POST(request: Request) {
+export async function PATCH(request: Request, { params }: Params) {
   try {
+    const { id } = await params
     const body = await request.json()
-    const res = await fetch(`${BACKEND_URL}/conversations`, {
-      method: 'POST',
+    const res = await fetch(`${BACKEND_URL}/tickets/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
       headers: backendHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
     })

@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server'
-import { BACKEND_URL, backendHeaders } from '../../../../lib/backend'
+import { BACKEND_URL, backendHeaders } from '../../../lib/backend'
 
-export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params
+export async function GET(request: Request) {
   try {
-    const res = await fetch(`${BACKEND_URL}/conversations/${id}`, {
+    const { searchParams } = new URL(request.url)
+    const qs = searchParams.toString()
+    const res = await fetch(`${BACKEND_URL}/tickets${qs ? `?${qs}` : ''}`, {
       cache: 'no-store',
       headers: backendHeaders(),
     })
