@@ -1,22 +1,20 @@
-from app.agents.state import AgentState, AgentName
-from app.config import get_settings
-from app.monitoring import get_logger
-from app.tools.support_tools import create_support_ticket, get_ticket_status, list_tickets_by_email, update_ticket_status
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import BaseTool
 
+from app.agents.route_utils import add_route
+from app.agents.state import AgentState, format_history
+from app.agents.tool_loop import run_tool_loop, successful_results
+from app.config import get_settings
+from app.monitoring import get_logger
+from app.tools.support_tools import (
+    create_support_ticket,
+    get_ticket_status,
+    list_tickets_by_email,
+    update_ticket_status,
+)
+
 settings = get_settings()
 logger = get_logger("support_ticket_agent")
-
-
-def _add_route(state: AgentState, action: str) -> list[dict]:
-    route = list(state.get("route", []))
-    route.append({
-        "agent": "support_ticket",
-        "action": action,
-        "timestamp": __import__("time").time(),
-    })
-    return route
 
 
 SUPPORT_PROMPT = ChatPromptTemplate.from_messages([
@@ -31,6 +29,9 @@ SUPPORT_PROMPT = ChatPromptTemplate.from_messages([
         "\n\nWhen a customer reports an issue, use create_support_ticket to create a real ticket and return the ticket ID."
         " When a customer asks about their ticket status, use get_ticket_status or list_tickets_by_email."
         " Acknowledge the problem, show empathy, and provide the actual ticket ID and next steps."
+        "\nYou may call multiple tools in sequence. Tool results are returned to you so you can decide the next call."
+        "\nWhen you have all the information you need, reply to the customer directly WITHOUT calling any more tools."
+        "\nConversation history:\n{history}"
     ),
     (
         "user",
@@ -47,66 +48,45 @@ SUPPORT_TOOLS: list[BaseTool] = [
 ]
 
 
+def _build_response(executed_calls: list[dict], fallback_text: str | None) -> str:
+    """Prefer grounded tool output; fall back to the model's final message."""
+    for tc in reversed(successful_results(executed_calls)):
+        result = tc["result"]
+        if tc["tool"] == "create_support_ticket" and "ticket_id" in result:
+            return f"I've created a support ticket for you. {result}"
+        if tc["tool"] in ("get_ticket_status", "list_tickets_by_email") and "ticket_id" in result:
+            return f"Here are your ticket details. {result}"
+        if tc["tool"] == "update_ticket_status" and "error" not in result:
+            return f"I've updated your ticket. {result}"
+    return fallback_text or "I've processed your support request."
+
+
 def support_ticket_node(state: AgentState):
-    from langchain_openai import ChatOpenAI
+    from app.utils import get_chat_llm
 
     query = state["query"]
+    history = format_history(state.get("messages", []))
     order_data = state.get("order_data", {})
 
-    llm = ChatOpenAI(
-        base_url=settings.openrouter_base_url,
-        api_key=settings.openrouter_api_key or "sk-placeholder",
-        model=settings.primary_model,
-        temperature=0,
-    ).bind_tools(SUPPORT_TOOLS)
+    llm = get_chat_llm(tools=SUPPORT_TOOLS)
+    executed_calls: list[dict] = []
 
     try:
-        chain = SUPPORT_PROMPT | llm
-        answer = chain.invoke({
-            "question": query,
-            "order_data": str(order_data) if order_data else "No order data available.",
-            "tools": ", ".join([t.name for t in SUPPORT_TOOLS]),
-        })
-
-        response_text = answer.content if answer.content else "I've processed your support request."
-
-        tool_calls = []
-        if hasattr(answer, "tool_calls") and answer.tool_calls:
-            for tool_call in answer.tool_calls:
-                tool_name = tool_call["name"]
-                tool_args = tool_call["args"]
-                selected_tool = next((t for t in SUPPORT_TOOLS if t.name == tool_name), None)
-                if selected_tool:
-                    try:
-                        tool_result = selected_tool.invoke(tool_args)
-                        tool_calls.append({
-                            "tool": tool_name,
-                            "args": tool_args,
-                            "result": tool_result,
-                        })
-                        logger.info("support_tool_call", extra={"extra_data": {
-                            "tool": tool_name,
-                            "args": tool_args,
-                            "result_preview": str(tool_result)[:200],
-                        }})
-                        if tool_name == "create_support_ticket" and "ticket_id" in str(tool_result):
-                            response_text = f"I've created a support ticket for you. {tool_result}"
-                        elif tool_name in ["get_ticket_status", "list_tickets_by_email"] and "ticket_id" in str(tool_result):
-                            response_text = f"Here are your ticket details. {tool_result}"
-                    except Exception as e:
-                        tool_calls.append({
-                            "tool": tool_name,
-                            "args": tool_args,
-                            "error": str(e),
-                        })
-                        logger.error("support_tool_error", extra={"extra_data": {
-                            "tool": tool_name,
-                            "error": str(e),
-                        }})
-
-        if not tool_calls:
-            response_text = answer.content or "I've processed your support request."
-
+        answer, executed_calls = run_tool_loop(
+            llm,
+            SUPPORT_PROMPT,
+            {
+                "question": query,
+                "history": history,
+                "order_data": str(order_data) if order_data else "No order data available.",
+                "tools": ", ".join([t.name for t in SUPPORT_TOOLS]),
+            },
+            SUPPORT_TOOLS,
+        )
+        response_text = _build_response(
+            executed_calls,
+            answer.content if (answer and answer.content) else None,
+        )
     except Exception as e:
         response_text = "I couldn't process your support request at this time. Please try again later."
         logger.error("support_agent_exception", extra={"extra_data": {
@@ -116,14 +96,14 @@ def support_ticket_node(state: AgentState):
 
     logger.info("support_agent_result", extra={"extra_data": {
         "response_preview": response_text[:200],
-        "tool_calls_count": len(tool_calls),
+        "tool_calls_count": len(executed_calls),
     }})
 
     return {
         "current_agent": "support_ticket",
         "response": response_text,
         "next_agent": "evaluator",
-        "visited_agents": state.get("visited_agents", []) + ["support_ticket"],
+        "visited_agents": [*state.get("visited_agents", []), "support_ticket"],
         "handoff_count": state.get("handoff_count", 0),
-        "route": _add_route(state, "handle_support_ticket"),
+        "route": add_route(state, "support_ticket", "handle_support_ticket"),
     }

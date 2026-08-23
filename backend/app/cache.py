@@ -6,7 +6,6 @@ Production mode uses Redis (shared, persistent across restarts).
 
 import hashlib
 import time
-from typing import Optional, Union
 
 from app.config import get_settings
 from app.monitoring import get_logger
@@ -32,7 +31,7 @@ class ResponseCache:
         normalized = query.lower().strip()
         return hashlib.sha256(normalized.encode()).hexdigest()
 
-    def get(self, query: str) -> Optional[str]:
+    def get(self, query: str) -> str | None:
         """
         Get cached response if it exists and hasn't expired.
         Returns None on cache miss.
@@ -99,7 +98,7 @@ class RedisResponseCache:
         normalized = query.lower().strip()
         return f"{self._prefix}{hashlib.sha256(normalized.encode()).hexdigest()}"
 
-    def get(self, query: str) -> Optional[str]:
+    def get(self, query: str) -> str | None:
         try:
             value = self._client.get(self._make_key(query))
         except Exception as e:
@@ -136,7 +135,7 @@ class RedisResponseCache:
         }
 
 
-def create_cache(ttl_seconds: int = 300) -> Union[ResponseCache, RedisResponseCache]:
+def create_cache(ttl_seconds: int = 300) -> ResponseCache | RedisResponseCache:
     """
     Cache factory following the checkpoints.py backend-switch pattern.
 

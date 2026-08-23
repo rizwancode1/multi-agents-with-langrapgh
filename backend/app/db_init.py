@@ -5,11 +5,12 @@ Run this script once to bootstrap the database.
 """
 
 import json
+from datetime import datetime
 from pathlib import Path
-from datetime import datetime, timezone
-from app.db import init_db, get_db
-from app.models_db import Order, OrderItem, SupportTicket, RefundRequest
+
 from app.config import get_settings
+from app.db import get_db, init_db
+from app.models_db import Order, OrderItem, SupportTicket
 
 settings = get_settings()
 ORDERS_JSON_PATH = Path(__file__).resolve().parent / "data" / "orders.json"
@@ -21,7 +22,7 @@ def seed_orders():
         print(f"Orders JSON not found at {ORDERS_JSON_PATH}")
         return
 
-    with open(ORDERS_JSON_PATH, "r", encoding="utf-8") as f:
+    with open(ORDERS_JSON_PATH, encoding="utf-8") as f:
         orders_data = json.load(f)
 
     db = get_db()
@@ -74,11 +75,69 @@ def seed_orders():
         db.close()
 
 
+def seed_tickets():
+    """Seed a few demo support tickets so the live dashboard isn't empty on first run.
+
+    Skipped automatically once any ticket exists (agent-created tickets included).
+    """
+    demo_tickets = [
+        {
+            "ticket_id": "TKT-DEMO0001",
+            "customer_name": "Jordan Lee",
+            "customer_email": "jordan.lee@example.com",
+            "subject": "Duplicate charge on order ORD-1001",
+            "description": "I was charged twice for the same order. Please refund the duplicate payment.",
+            "status": "open",
+            "priority": "high",
+            "order_id": "ORD-1001",
+        },
+        {
+            "ticket_id": "TKT-DEMO0002",
+            "customer_name": "Priya Sharma",
+            "customer_email": "priya.sharma@example.com",
+            "subject": "Package marked delivered but not received",
+            "description": "Tracking says delivered yesterday, but nothing has arrived. Need help locating the package.",
+            "status": "in_progress",
+            "priority": "urgent",
+            "order_id": "ORD-1002",
+        },
+        {
+            "ticket_id": "TKT-DEMO0003",
+            "customer_name": "Marcus Webb",
+            "customer_email": "marcus.webb@example.com",
+            "subject": "Question about warranty coverage",
+            "description": "Wanted to check if my headphones are still under warranty before requesting a return.",
+            "status": "resolved",
+            "priority": "low",
+            "order_id": None,
+        },
+    ]
+
+    db = get_db()
+    try:
+        existing_count = db.query(SupportTicket).count()
+        if existing_count > 0:
+            print(f"Database already contains {existing_count} tickets. Skipping ticket seed.")
+            return
+
+        for data in demo_tickets:
+            db.add(SupportTicket(**data))
+        db.commit()
+        print(f"Successfully seeded {len(demo_tickets)} demo tickets.")
+    except Exception as e:
+        db.rollback()
+        print(f"Error seeding tickets: {e}")
+        raise
+    finally:
+        db.close()
+
+
 def main():
     print("Initializing database...")
     init_db()
     print("Tables created.")
     seed_orders()
+    seed_tickets()
     print("Database initialization complete.")
 
 

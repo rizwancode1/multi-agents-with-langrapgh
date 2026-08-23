@@ -3,13 +3,10 @@ Monitoring & Structured Logging
 Production-grade metrics collection and JSON logging.
 """
 
-import logging
 import json
+import logging
 import time
-from datetime import datetime, timezone
-from functools import wraps
-from typing import Any, Callable
-
+from datetime import UTC, datetime
 
 # === Structured JSON Logger ===
 
@@ -18,7 +15,7 @@ class JSONFormatter(logging.Formatter):
 
     def format(self, record):
         log_obj = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "level": record.levelname,
             "message": record.getMessage(),
             "module": record.module,
@@ -28,7 +25,7 @@ class JSONFormatter(logging.Formatter):
         if hasattr(record, "extra_data"):
             log_obj.update(record.extra_data)
         return json.dumps(log_obj)
-    
+
 def get_logger(name: str = "production-api") -> logging.Logger:
     """Create a structured JSON logger."""
     logger = logging.getLogger(name)
@@ -40,7 +37,7 @@ def get_logger(name: str = "production-api") -> logging.Logger:
         logger.setLevel(logging.INFO)
 
     return logger
-    
+
 
 
 # === Metrics Collector ===
@@ -75,8 +72,8 @@ class MetricsCollector:
         self._requests_total += 1
         self._latency_sum += latency_ms
         self._latency_count += 1
-        self._tokens_input += input_tokens
-        self._tokens_output += output_tokens
+        if input_tokens or output_tokens:
+            self.add_tokens(input_tokens, output_tokens)
 
         if error:
             self._errors_total += 1
@@ -84,6 +81,11 @@ class MetricsCollector:
             self._cache_hits += 1
         else:
             self._cache_misses += 1
+
+    def add_tokens(self, input_tokens: int, output_tokens: int) -> None:
+        """Accumulate real LLM token usage reported by provider callbacks."""
+        self._tokens_input += max(0, input_tokens)
+        self._tokens_output += max(0, output_tokens)
 
     @property
     def summary(self) -> dict:
@@ -113,6 +115,69 @@ class MetricsCollector:
         }
 
 
+# === Shared metrics singleton ===
+#
+# A single process-wide MetricsCollector so LLM callbacks deep inside agent
+# code can record real token usage without threading a collector through
+# every call. The API binds this instance in its lifespan.
+
+_metrics: MetricsCollector = MetricsCollector()
+
+
+def get_metrics() -> MetricsCollector:
+    """Return the process-wide metrics collector."""
+    return _metrics
+
+
+def set_metrics(collector: MetricsCollector) -> None:
+    """Replace the process-wide collector (used by tests)."""
+    global _metrics
+    _metrics = collector
+
+
+class TokenUsageHandler:
+    """
+    LangChain callback handler that accumulates REAL provider-reported token
+    usage into the shared MetricsCollector instead of word-count estimates.
+
+    Attach via ``get_chat_llm(..., callbacks=[TokenUsageHandler()])`` — done
+    once inside app.utils so every LLM call is accounted for.
+    """
+
+    def __init__(self, collector: "MetricsCollector | None" = None):
+        self.collector = collector or get_metrics()
+
+    def on_llm_end(self, response, **kwargs) -> None:
+        try:
+            usage = {}
+            llm_output = getattr(response, "llm_output", None) or {}
+            usage = llm_output.get("token_usage") or {}
+            if not usage:
+                # Newer OpenAI-style usage_metadata on the sampled generation
+                gens = getattr(response, "generations", None) or []
+                for gen_list in gens:
+                    for gen in gen_list:
+                        meta = getattr(gen, "usage_metadata", None) or (
+                            gen.get("usage_metadata") if isinstance(gen, dict) else None
+                        ) or {}
+                        if meta:
+                            usage = {
+                                "prompt_tokens": meta.get("input_tokens", 0),
+                                "completion_tokens": meta.get("output_tokens", 0),
+                            }
+                            break
+                    if usage:
+                        break
+            if usage:
+                self.collector.add_tokens(
+                    int(usage.get("prompt_tokens", 0) or 0),
+                    int(usage.get("completion_tokens", 0) or 0),
+                )
+        except Exception:
+            # Never let metrics accounting break an LLM call
+            pass
+
+
 # === Request Timer (utility) ===
 
 class RequestTimer:
@@ -124,8 +189,8 @@ class RequestTimer:
 
     def __exit__(self, *args):
         self.elapsed_ms = (time.time() - self.start) * 1000
-        
-        
+
+
 # uv run python -c "
 # from app.monitoring import get_logger, MetricsCollector, RequestTimer
 # import time

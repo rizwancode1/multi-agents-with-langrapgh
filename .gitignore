@@ -1,1 +1,46 @@
-.kilo
+# --- Environment / secrets ---
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# --- Databases / generated data (never commit runtime state) ---
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
+backend/chroma_db/
+backend/orders.db
+backend/checkpoints.db*
+backend/responses.json
+
+# --- Node / Next.js ---
+node_modules/
+.next/
+out/
+tsconfig.tsbuildinfo
+next-env.d.ts
+
+# --- Misc ---
+.DS_Store
+Thumbs.db
+*.log
+*.pid
+.kilo/
+
+# Keep dependency lockfiles in VCS
+!pnpm-lock.yaml
+!uv.lock

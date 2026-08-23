@@ -10,39 +10,83 @@ Wires together:
 - Health checks
 """
 
-import os
+import asyncio
+import contextlib
 import time
 import uuid
-import asyncio
 from contextlib import asynccontextmanager
-
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from slowapi import Limiter
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
-from langsmith import traceable
-from dotenv import load_dotenv
-
-from app.config import get_settings
-from app.models import (
-    QueryRequest, QueryResponse,
-    HealthResponse, MetricsResponse,
-    ErrorResponse,
-    StreamEvent, STATUS_MESSAGES,
-)
-from app.security import SecurityPipeline
-from app.cache import create_cache
-from app.monitoring import get_logger, MetricsCollector, RequestTimer
-from app.agents.graph import build_graph
-from app.agents.state import AgentState
-from app.checkpoints import get_checkpointer
-from app.api_conversations import router as conversations_router
-from app.api_conversations import save_conversation_message, get_conversation_thread_id, get_conversation_messages
 from pathlib import Path
 
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    StreamingResponse,
+)
+from fastapi.staticfiles import StaticFiles
+from langsmith import traceable
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+
+from app.agents.graph import build_graph
+from app.agents.state import AgentState
+from app.api_conversations import (
+    get_conversation_messages,
+    get_conversation_thread_id,
+    save_conversation_message,
+)
+from app.api_conversations import router as conversations_router
+from app.api_tickets import router as tickets_router
+from app.auth import (  # single source for auth + limiter keying
+    _rate_limit_key,
+    require_api_key,
+)
+from app.cache import create_cache
+from app.checkpoints import get_checkpointer
+from app.config import get_settings
+from app.models import (
+    STATUS_MESSAGES,
+    ErrorResponse,
+    HealthResponse,
+    MetricsResponse,
+    QueryRequest,
+    QueryResponse,
+    StreamEvent,
+)
+from app.monitoring import MetricsCollector, RequestTimer, get_logger, get_metrics
+from app.security import SecurityPipeline
+
 load_dotenv()
+
+settings = get_settings()
+
+
+def _build_limiter() -> Limiter:
+    """Limiter backed by Redis when reachable in production so the limit is
+    shared across workers; in-memory otherwise (per-worker)."""
+    storage_uri = "memory"
+    if settings.cache_backend == "redis" or (
+        settings.cache_backend == "auto" and settings.is_production
+    ):
+        try:
+            import redis as redis_lib
+            client = redis_lib.Redis.from_url(
+                settings.redis_url,
+                socket_connect_timeout=1,
+                socket_timeout=1,
+            )
+            client.ping()
+            storage_uri = settings.redis_url
+        except Exception:
+            logger.warning("rate_limiter_redis_unreachable", extra={"extra_data": {
+                "redis_url": settings.redis_url,
+            }})
+    # slowapi/limits requires an explicit scheme; in-memory storage is
+    # per-worker, redis storage shares the budget across workers.
+    return Limiter(key_func=_rate_limit_key, storage_uri="memory://" if storage_uri == "memory" else storage_uri)
 
 
 # Graph agent nodes that produce user-facing status updates
@@ -63,6 +107,10 @@ def _build_initial_state(body: "QueryRequest", cleaned_message: str, thread_id: 
     Loads persisted conversation history (when a conversation_id is provided) so
     agents can understand follow-up requests, and resets all transient per-turn
     data so checkpointed values from a previous turn cannot leak into this one.
+
+    History is PII-masked on the way in — raw messages are persisted for audit
+    but agents never see unmasked PII (previously masking applied only to the
+    current message, so older turns re-introduced it).
     """
     history: list[dict] = []
     if body.conversation_id:
@@ -71,6 +119,10 @@ def _build_initial_state(body: "QueryRequest", cleaned_message: str, thread_id: 
         # the history shows only PRIOR turns (the current query is passed separately).
         if history and history[-1]["role"] == "user" and history[-1]["text"] == body.query:
             history = history[:-1]
+        history = [
+            {**m, "text": security.pii_detector.mask(m.get("text", ""))}
+            for m in history
+        ]
 
     return {
         "query": cleaned_message,
@@ -96,7 +148,7 @@ def _build_initial_state(body: "QueryRequest", cleaned_message: str, thread_id: 
 # === Global instances (initialized in lifespan) ===
 security: SecurityPipeline = None
 cache = None
-metrics: MetricsCollector = None
+metrics: MetricsCollector = get_metrics()  # process-wide singleton (LLM callbacks write here)
 multi_agent_graph = None
 logger = get_logger()
 
@@ -109,9 +161,7 @@ async def lifespan(app: FastAPI):
     Initialize all components on startup, clean up on shutdown.
     This is the modern FastAPI pattern (replaces @app.on_event).
     """
-    global security, cache, metrics, multi_agent_graph
-
-    settings = get_settings()
+    global security, cache, multi_agent_graph
 
     logger.info("Starting multi-agent API...", extra={"extra_data": {
         "environment": settings.app_env,
@@ -122,7 +172,6 @@ async def lifespan(app: FastAPI):
     # Initialize components
     security = SecurityPipeline()
     cache = create_cache(ttl_seconds=settings.cache_ttl_seconds)
-    metrics = MetricsCollector()
 
     # Ingest RAG corpus (vector store + BM25) if enabled
     if settings.ingest_on_startup:
@@ -142,15 +191,15 @@ async def lifespan(app: FastAPI):
     init_db()
     seed_orders()
 
-    output_path = Path.cwd() / "multi_agent_graph.png"
-
-    try:
-        output_path.write_bytes(
-            multi_agent_graph.get_graph().draw_mermaid_png()
-        )
-        print(f"Graph Image saved to: {output_path}")
-    except Exception as e:
-        print(f"Could not save graph image: {e}")
+    if settings.debug_draw_graph:
+        output_path = Path.cwd() / "multi_agent_graph.png"
+        try:
+            output_path.write_bytes(
+                multi_agent_graph.get_graph().draw_mermaid_png()
+            )
+            logger.info("graph_image_saved", extra={"extra_data": {"path": str(output_path)}})
+        except Exception as e:
+            logger.warning("graph_image_skipped", extra={"extra_data": {"error": str(e)}})
 
     logger.info("All components initialized. Ready to serve requests.", extra={"extra_data": {
         "checkpoint_storage": settings.checkpoint_storage,
@@ -162,9 +211,17 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down...", extra={"extra_data": metrics.summary})
 
+    # Release the checkpoint DB connection (previously leaked until GC).
+    conn = getattr(checkpointer, "conn", None)
+    if conn is not None:
+        try:
+            await conn.close()
+        except Exception as e:
+            logger.warning("checkpointer_close_failed", extra={"extra_data": {"error": str(e)}})
+
 
 # === Rate Limiter Setup ===
-limiter = Limiter(key_func=get_remote_address)
+limiter = _build_limiter()
 
 
 # === FastAPI App ===
@@ -176,6 +233,7 @@ app = FastAPI(
 )
 app.state.limiter = limiter
 app.include_router(conversations_router)
+app.include_router(tickets_router)
 
 # Mount static files
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
@@ -227,13 +285,13 @@ async def generic_exception_handler(request: Request, exc: Exception):
 @app.post("/query", response_model=QueryResponse)
 @limiter.limit(get_settings().rate_limit)
 @traceable(name="query_endpoint")
-async def query_agents(request: Request, body: QueryRequest):
+async def query_agents(request: Request, body: QueryRequest, _auth: None = Depends(require_api_key)):
     """
     Main multi-agent query endpoint.
 
     Flow:
     1. Security check (injection + PII masking)
-    2. Cache lookup
+    2. Cache lookup (keyed on query + conversation scope)
     3. LangGraph multi-agent invoke (if cache miss)
     4. Output validation
     5. Cache store
@@ -260,13 +318,25 @@ async def query_agents(request: Request, body: QueryRequest):
         if body.conversation_id:
             save_conversation_message(body.conversation_id, "user", body.query)
 
+        # ---- Step 1c: Resolve thread scope BEFORE the cache so responses that
+        # depend on conversation history are never served across conversations
+        # (previously identical query text returned whichever answer was cached first).
+        if body.conversation_id:
+            thread_id = body.thread_id or get_conversation_thread_id(body.conversation_id) or str(uuid.uuid4())
+        else:
+            thread_id = body.thread_id or str(uuid.uuid4())
+        cache_scope = str(body.conversation_id) if body.conversation_id else body.thread_id or ""
+        cache_key = f"{cache_scope}::{cleaned_message}" if cache_scope else cleaned_message
+
         # ---- Step 2: Cache Lookup ----
-        cached_response = cache.get(cleaned_message)
+        cached_response = cache.get(cache_key)
         if cached_response is not None:
             metrics.record_request(latency_ms=0, cache_hit=True)
             logger.info("Cache hit", extra={"extra_data": {
                 "query": body.query[:100],
             }})
+            if body.conversation_id:
+                save_conversation_message(body.conversation_id, "assistant", cached_response)
             return QueryResponse(
                 query=body.query,
                 response=cached_response,
@@ -281,13 +351,11 @@ async def query_agents(request: Request, body: QueryRequest):
                 cached=True,
                 processing_time_ms=0,
                 security_notes=security_notes,
+                thread_id=thread_id,
+                conversation_id=body.conversation_id,
             )
 
-        # ---- Step 3: Invoke Multi-Agent Graph ----
-        if body.conversation_id:
-            thread_id = body.thread_id or get_conversation_thread_id(body.conversation_id) or str(uuid.uuid4())
-        else:
-            thread_id = body.thread_id or str(uuid.uuid4())
+        # ---- Step 3: Invoke Multi-Agent Graph (non-blocking) ----
         graph_config = {
             "configurable": {
                 "thread_id": thread_id,
@@ -296,7 +364,7 @@ async def query_agents(request: Request, body: QueryRequest):
 
         try:
             initial_state = _build_initial_state(body, cleaned_message, thread_id)
-            result = multi_agent_graph.invoke(initial_state, config=graph_config)
+            result = await multi_agent_graph.ainvoke(initial_state, config=graph_config)
         except Exception as e:
             logger.error(f"Agent invocation failed: {e}", extra={"extra_data": {
                 "query": body.query[:100],
@@ -306,7 +374,7 @@ async def query_agents(request: Request, body: QueryRequest):
             raise HTTPException(
                 status_code=500,
                 detail="An error occurred while processing your request.",
-            )
+            ) from e
 
         response_text = result.get("response", "")
         visited = result.get("visited_agents", [])
@@ -346,13 +414,10 @@ async def query_agents(request: Request, body: QueryRequest):
             save_conversation_message(body.conversation_id, "assistant", validated_response)
 
     # ---- Step 6: Log & Record Metrics ----
-    input_tokens = int(len(cleaned_message.split()) * 1.3)
-    output_tokens = int(len(validated_response.split()) * 1.3)
-
+    # Real token usage is accumulated by TokenUsageHandler (attached to every
+    # LLM in app.utils); no more word-count estimates.
     metrics.record_request(
         latency_ms=timer.elapsed_ms,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
         cache_hit=False,
     )
 
@@ -394,14 +459,14 @@ async def query_agents(request: Request, body: QueryRequest):
 @app.post("/query/stream")
 @limiter.limit(get_settings().rate_limit)
 @traceable(name="query_stream_endpoint")
-async def stream_query(request: Request, body: QueryRequest):
+async def stream_query(request: Request, body: QueryRequest, _auth: None = Depends(require_api_key)):
     """
     Streaming multi-agent query endpoint via SSE.
 
     Yields real-time status events as the LangGraph workflow executes.
     """
     # ---- Security + Cache Lookup ----
-    is_allowed, cleaned_message, notes = security.check_input(body.query)
+    is_allowed, cleaned_message, _notes = security.check_input(body.query)
     if not is_allowed:
         metrics.record_request(latency_ms=0, error=True)
         raise HTTPException(
@@ -413,7 +478,14 @@ async def stream_query(request: Request, body: QueryRequest):
     if body.conversation_id:
         save_conversation_message(body.conversation_id, "user", body.query)
 
-    cached_response = cache.get(cleaned_message)
+    if body.conversation_id:
+        thread_id = body.thread_id or get_conversation_thread_id(body.conversation_id) or str(uuid.uuid4())
+    else:
+        thread_id = body.thread_id or str(uuid.uuid4())
+    cache_scope = str(body.conversation_id) if body.conversation_id else body.thread_id or ""
+    cache_key = f"{cache_scope}::{cleaned_message}" if cache_scope else cleaned_message
+
+    cached_response = cache.get(cache_key)
     if cached_response is not None:
         metrics.record_request(latency_ms=0, cache_hit=True)
         if body.conversation_id:
@@ -430,10 +502,6 @@ async def stream_query(request: Request, body: QueryRequest):
             headers=headers,
         )
 
-    if body.conversation_id:
-        thread_id = body.thread_id or get_conversation_thread_id(body.conversation_id) or str(uuid.uuid4())
-    else:
-        thread_id = body.thread_id or str(uuid.uuid4())
     graph_config = {
         "configurable": {
             "thread_id": thread_id,
@@ -526,7 +594,7 @@ async def stream_query(request: Request, body: QueryRequest):
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=1.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     now = time.monotonic()
                     if now - graph_started >= MAX_GRAPH_SECONDS:
                         terminal_sent = True
@@ -559,10 +627,8 @@ async def stream_query(request: Request, body: QueryRequest):
         finally:
             if not task.done():
                 task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
 
         if final_output:
             response_text = final_output.get("response", "")
@@ -600,12 +666,9 @@ async def stream_query(request: Request, body: QueryRequest):
             yield f"data: {done_event.model_dump_json()}\n\n"
             terminal_sent = True
 
-            input_tokens = int(len(cleaned_message.split()) * 1.3)
-            output_tokens = int(len(validated_response.split()) * 1.3)
+            # Real token usage arrives via TokenUsageHandler on each LLM call.
             metrics.record_request(
                 latency_ms=(time.monotonic() - start_time) * 1000,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
                 cache_hit=False,
             )
         elif not terminal_sent:
@@ -624,7 +687,7 @@ async def stream_query(request: Request, body: QueryRequest):
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
-    """Health check for Docker/Kubernetes."""
+    """Health check for Docker/Kubernetes — probes DB and cache, not just wiring."""
     settings = get_settings()
 
     checks = {
@@ -632,6 +695,25 @@ async def health():
         "security": security is not None,
         "cache": cache is not None,
     }
+
+    # Database connectivity (previously a dead DB still reported healthy).
+    try:
+        from sqlalchemy import text
+
+        from app.db import engine
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        checks["database"] = True
+    except Exception as e:
+        checks["database"] = False
+        logger.warning("health_db_check_failed", extra={"extra_data": {"error": str(e)}})
+
+    # Redis reachability when it's the active backend.
+    if cache is not None and getattr(cache, "_client", None) is not None:
+        try:
+            checks["cache_backend_reachable"] = bool(cache._client.ping())
+        except Exception:
+            checks["cache_backend_reachable"] = False
 
     all_healthy = all(checks.values())
 

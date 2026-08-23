@@ -1,10 +1,11 @@
-from typing import Literal
 import re
+from typing import Literal
 
-from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field
 
-from app.agents.state import AgentState, AgentName, format_history
+from app.agents.route_utils import add_route
+from app.agents.state import AgentState, format_history
 from app.config import get_settings
 from app.monitoring import get_logger
 
@@ -19,24 +20,20 @@ class RouteDecision(BaseModel):
     reason: str = Field(description="Why this agent should handle the request")
 
 
-def _add_route(state: AgentState, action: str) -> list[dict]:
-    route = list(state.get("route", []))
-    route.append({
-        "agent": state.get("current_agent", "router"),
-        "action": action,
-        "timestamp": __import__("time").time(),
-    })
-    return route
-
-
 def _fallback_route(query: str) -> dict:
     q = query.lower()
-    if any(k in q for k in ["order", "purchase", "shipped", "delivered", "status", "ord-"]):
+    if any(k in q for k in ["ord-", "order status", "track", "where is my order", "my order"]):
+        return {"agent": "order", "reason": "Query appears to be about an order."}
+    # Action requests (tickets/complaints) must beat policy lookups, otherwise
+    # phrases like "i want a refund" drag actionable requests into policy_rag.
+    if any(k in q for k in ["ticket", "complaint", "complain", "damaged", "broken",
+                            "defective", "not working", "issue", "problem",
+                            "unhappy", "bad", "never arrived", "missing", "faulty"]):
+        return {"agent": "support_ticket", "reason": "Query appears to be a support request."}
+    if any(k in q for k in ["order", "purchase", "shipped", "delivered", "status"]):
         return {"agent": "order", "reason": "Query appears to be about an order."}
     if any(k in q for k in ["policy", "faq", "documentation", "rules", "guidelines", "shipping", "return", "refund"]):
         return {"agent": "policy_rag", "reason": "Query appears to be about policies or documentation."}
-    if any(k in q for k in ["complaint", "issue", "problem", "support", "ticket", "help", "unhappy", "bad"]):
-        return {"agent": "support_ticket", "reason": "Query appears to be a support request."}
     return {"agent": "policy_rag", "reason": "Defaulting to knowledge base lookup."}
 
 
@@ -96,19 +93,12 @@ ROUTER_PROMPT = ChatPromptTemplate.from_messages([
 
 
 def router_node(state: AgentState):
-    from langchain_openai import ChatOpenAI
+    from app.utils import get_chat_llm
 
     query = state["query"]
     history = format_history(state.get("messages", []))
 
-    llm = ChatOpenAI(
-        base_url=settings.openrouter_base_url,
-        api_key=settings.openrouter_api_key or "sk-placeholder",
-        model=settings.primary_model,
-        temperature=0,
-    )
-
-    router_llm = llm.with_structured_output(RouteDecision)
+    router_llm = get_chat_llm(schema=RouteDecision)
 
     try:
         chain = ROUTER_PROMPT | router_llm
@@ -146,6 +136,6 @@ def router_node(state: AgentState):
         "handoff_reason": reason,
         "intents": intents,
         "order_id": order_id,
-        "visited_agents": state.get("visited_agents", []) + ["router"],
-        "route": _add_route(state, f"route_to_{agent}"),
+        "visited_agents": [*state.get("visited_agents", []), "router"],
+        "route": add_route(state, "router", f"route_to_{agent}"),
     }

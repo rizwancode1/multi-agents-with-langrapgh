@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-from typing import Optional
-from langgraph.graph import StateGraph, START, END
-from langgraph.types import Command
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.graph import END, START, StateGraph
 
-from app.agents.state import AgentState, AgentName
-from app.agents.router_agent import router_node
-from app.agents.rag_agent import rag_node as policy_rag_node
-from app.agents.order_agent import order_node
-from app.agents.support_ticket_agent import support_ticket_node
-from app.agents.return_refund_agent import return_refund_node
-from app.agents.formatter_agent import formatter_node
 from app.agents.evaluator_agent import evaluator_node, evaluator_router
-
+from app.agents.formatter_agent import formatter_node
+from app.agents.order_agent import order_node
+from app.agents.rag_agent import rag_node as policy_rag_node
+from app.agents.return_refund_agent import return_refund_node
+from app.agents.router_agent import router_node
+from app.agents.state import AgentState
+from app.agents.support_ticket_agent import support_ticket_node
 
 AGENT_CAPABILITIES = {
     "policy_rag": {
@@ -38,41 +35,66 @@ AGENT_CAPABILITIES = {
     },
 }
 
+# Safety caps advertised in the README. Enforced in agent_router so they apply
+# no matter which node set next_agent.
+MAX_HANDOFFS_PER_REQUEST = 5
+MAX_VISITS_PER_AGENT = 3
 
-def request_handoff(state: AgentState, target: AgentName, reason: str):
-    current_agent = state["current_agent"]
+VALID_AGENTS = set(AGENT_CAPABILITIES.keys())
+
+
+def resolve_next_agent(state: AgentState) -> str:
+    """Validate and sanitize next_agent before routing.
+
+    Enforces:
+      - the agent actually exists,
+      - the handoff is allowed by AGENT_CAPABILITIES (or comes from the
+        router/evaluator, which may target any specialist),
+      - the per-request handoff cap and per-agent visit cap.
+
+    Violations degrade gracefully to evaluator/formatter instead of raising,
+    so a misbehaving LLM can never crash a request or loop forever.
+    """
+    next_agent = state.get("next_agent")
+    if not next_agent:
+        return "evaluator"
+
+    if next_agent == "formatter":
+        return "formatter"
+    if next_agent == "evaluator":
+        return "evaluator"
+
+    if next_agent not in VALID_AGENTS:
+        return "evaluator"
+
+    visited = state.get("visited_agents", [])
+    agent_visits = sum(1 for a in visited if a == next_agent)
+    if agent_visits >= MAX_VISITS_PER_AGENT:
+        return "formatter"
+
+    if state.get("handoff_count", 0) >= MAX_HANDOFFS_PER_REQUEST:
+        return "formatter"
+
+    current_agent = state.get("current_agent")
     allowed = AGENT_CAPABILITIES.get(current_agent, {}).get("can_handoff_to", [])
+    # Router and evaluator may route to any specialist; specialists are
+    # restricted to their declared can_handoff_to list.
+    privileged_sources = {None, "router", "evaluator"}
+    if current_agent not in privileged_sources and next_agent not in allowed:
+        return "evaluator"
 
-    if target not in allowed:
-        raise ValueError(f"{current_agent} cannot handoff to {target}")
-
-    count = state.get("handoff_count", 0)
-    if count >= 5:
-        raise RuntimeError("Maximum handoff limit reached")
-
-    return {
-        "next_agent": target,
-        "handoff_reason": reason,
-        "handoff_count": count + 1,
-    }
+    return next_agent
 
 
 def agent_router(state: AgentState):
-    next_agent = state.get("next_agent")
-    if next_agent:
-        visited = state.get("visited_agents", [])
-        agent_visits = sum(1 for a in visited if a == next_agent)
-        if agent_visits >= 3:
-            return "formatter"
-        return next_agent
-    return "evaluator"
+    return resolve_next_agent(state)
 
 
 def initial_router(state: AgentState):
     return state["next_agent"]
 
 
-def build_graph(checkpointer: Optional[BaseCheckpointSaver] = None):
+def build_graph(checkpointer: BaseCheckpointSaver | None = None):
     builder = StateGraph(AgentState)
 
     builder.add_node("router", router_node)
@@ -144,8 +166,3 @@ def build_graph(checkpointer: Optional[BaseCheckpointSaver] = None):
     )
 
     return builder.compile(checkpointer=checkpointer)
-
-
-# Module-level graph (no checkpointer by default for backward compatibility)
-graph = build_graph()
-

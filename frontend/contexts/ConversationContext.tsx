@@ -34,7 +34,7 @@ interface ConversationContextValue {
     title: string;
     customer?: string;
     status?: string;
-  }) => Promise<any>;
+  }) => Promise<Thread>;
   sidebarOpen: boolean;
   setSidebarOpen: (open: boolean) => void;
 }
@@ -42,6 +42,23 @@ interface ConversationContextValue {
 const ConversationContext = createContext<ConversationContextValue | undefined>(
   undefined,
 );
+
+type BackendMessage = {
+  id: number;
+  role: "user" | "assistant";
+  text: string;
+  time: string;
+  status?: string | null;
+};
+
+type BackendConversation = {
+  id: number;
+  title: string;
+  customer: string;
+  status: string;
+  thread_id?: string | null;
+  messages: BackendMessage[];
+};
 
 function conversationIdFromUrl(): number | null {
   if (typeof window === "undefined") return null;
@@ -84,25 +101,29 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
     queryFn: async (): Promise<Thread[]> => {
       const res = await fetch("/api/conversations");
       if (!res.ok) throw new Error("Failed to fetch conversations");
-      const data = await res.json();
-      return data.map((c: any) => ({
+      const data: BackendConversation[] = await res.json();
+      return data.map((c) => ({
         id: c.id,
         title: c.title,
         customer: c.customer,
         status: c.status,
-        messages: c.messages.map((m: any) => ({
+        messages: c.messages.map((m) => ({
           id: m.id,
           role: m.role,
           text: m.text,
           time: m.time,
-          status: m.status,
+          status: m.status ?? undefined,
         })),
       }));
     },
   });
 
   const createMutation = useMutation({
-    mutationFn: async (data: { title: string; customer?: string; status?: string }) => {
+    mutationFn: async (data: {
+      title: string;
+      customer?: string;
+      status?: string;
+    }): Promise<Thread> => {
       const res = await fetch("/api/conversations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -118,27 +139,27 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
     title: string;
     customer?: string;
     status?: string;
-  }) => {
+  }): Promise<Thread> => {
     const created = await createMutation.mutateAsync(data);
     setActiveId(created.id);
     setSidebarOpen(false);
     return created;
   };
 
-  useEffect(() => {
-    if (conversations.length === 0) return;
-    const exists = conversations.some((thread) => thread.id === activeId);
-    if (!exists) {
-      setActiveId(conversations[0].id);
-    }
-  }, [conversations, activeId]);
+  // Derive the effective active conversation instead of calling setState in an
+  // effect: when the active one disappears (or nothing is selected yet) the
+  // first conversation wins, without a cascading re-render.
+  const effectiveActiveId =
+    activeId !== null && conversations.some((thread) => thread.id === activeId)
+      ? activeId
+      : conversations[0]?.id ?? null;
 
   return (
     <ConversationContext.Provider
       value={{
         conversations,
         isLoading,
-        activeId,
+        activeId: effectiveActiveId,
         setActiveId,
         createConversation,
         sidebarOpen,

@@ -4,7 +4,8 @@ Input sanitization, PII detection/masking, output validation.
 """
 
 import re
-from typing import Optional
+from typing import ClassVar
+
 from langsmith import traceable
 
 # === Input Sanitization ===
@@ -16,7 +17,7 @@ class InputSanitizer:
     Detects prompt injection patterns and cleans dangerous content.
     """
 
-    INJECTION_PATTERNS = [
+    INJECTION_PATTERNS: ClassVar[list[str]] = [
         r"ignore\s+(all\s+)?previous\s+instructions",
         r"forget\s+(all\s+)?previous",
         r"new\s+instructions\s*:",
@@ -32,7 +33,7 @@ class InputSanitizer:
     def __init__(self):
         self.patterns = [re.compile(p, re.IGNORECASE) for p in self.INJECTION_PATTERNS]
 
-    def check(self, text: str) -> tuple[bool, Optional[str]]:
+    def check(self, text: str) -> tuple[bool, str | None]:
         """
         Check if input is safe.
         Returns: (is_safe, rejection_reason)
@@ -59,15 +60,15 @@ class PIIDetector:
     Works on BOTH input (before LLM) and output (before client).
     """
 
-    PATTERNS = {
+    PATTERNS: ClassVar[dict[str, re.Pattern]] = {
         # "email": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"),
         "phone": re.compile(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b"),
         "ssn": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
         "credit_card": re.compile(r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b"),
     }
 
-    MASK_MAP = {
-        # "email": "[EMAIL REDACTED]", 
+    MASK_MAP: ClassVar[dict[str, str]] = {
+        # "email": "[EMAIL REDACTED]",
         "phone": "[PHONE REDACTED]",
         "ssn": "[SSN REDACTED]",
         "credit_card": "[CARD REDACTED]",
@@ -99,7 +100,7 @@ class OutputValidator:
     Catches PII leakage and harmful content in responses.
     """
 
-    HARMFUL_PATTERNS = [
+    HARMFUL_PATTERNS: ClassVar[list[re.Pattern]] = [
         re.compile(r"here('s| is) (how|the way) to (hack|steal|attack)", re.I),
         re.compile(r"password\s+is\s+", re.I),
         re.compile(r"api[_\s]?key\s*[:=]", re.I),

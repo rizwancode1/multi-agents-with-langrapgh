@@ -1,12 +1,12 @@
 import { NextResponse } from 'next/server'
-
-const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000'
+import { BACKEND_URL, backendHeaders } from '../../../../lib/backend'
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
   try {
     const res = await fetch(`${BACKEND_URL}/conversations/${id}`, {
       cache: 'no-store',
+      headers: backendHeaders(),
     })
     if (!res.ok) {
       return NextResponse.json({ error: 'Backend error', status: res.status }, { status: res.status })

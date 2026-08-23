@@ -37,6 +37,35 @@
   --font-mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, monospace;
 }
 
+/*
+  ─── PERF PASS NOTES ───
+  The two expensive properties in the original file were:
+    1. filter: blur(64px) / blur(40px) on two full-viewport, animated
+       pseudo-elements. Blurring a canvas that large every animation
+       frame is one of the heaviest things a mobile GPU can be asked
+       to do, especially at 60fps.
+    2. backdrop-filter: blur(24px) saturate(140%) on `.aurora-surface`.
+       backdrop-filter forces the browser to re-sample and blur
+       everything underneath the element on every paint — very costly
+       on panels that sit over the animated background and are visible
+       for the whole session (composer, cards, sidebar).
+
+  Fixes applied, same visual language, no GPU-blur:
+    - The two glow layers are replaced with gradients that carry many
+      more color stops (a hand-authored falloff), which fakes the soft
+      "blurred blob" look without the browser ever running a blur pass.
+    - The diagonal sheen layer no longer animates `background-position`
+      (a paint-triggering property) — it's oversized and animated with
+      `transform: translate3d()` instead, which is compositor-only.
+    - `.aurora-surface` drops backdrop-filter entirely and reuses what
+      used to be the `@supports not (backdrop-filter)` fallback (a
+      tinted, mostly-opaque panel) as the single, unconditional style,
+      plus a faint static sheen gradient to keep some "glass" read.
+    - `mix-blend-mode` is dropped (it forces an extra compositing pass);
+      the same layered-color effect is baked into the gradient alphas
+      instead, so `--aurora-blend-2` is gone too.
+*/
+
 /* ─── Layer: Base ─── */
 @layer base {
   @font-face {
@@ -85,7 +114,6 @@
 
     --aurora-opacity: 0.46;
     --aurora-opacity-2: 0.32;
-    --aurora-blend-2: overlay;
 
     --shadow-color: 255 25% 12%;
     --shadow-sm: 0 1px 2px hsl(var(--shadow-color) / 0.04),
@@ -214,6 +242,9 @@
     contain: layout style paint;
   }
 
+  /* Glow blobs: no filter — softness comes from extra gradient stops
+     (a hand-rolled falloff curve) instead of a real blur pass. Only
+     `transform` is animated, so this stays on the compositor thread. */
   .aurora-shell::before {
     position: fixed;
     inset: -18% -10%;
@@ -221,62 +252,78 @@
     pointer-events: none;
     content: "";
     background: radial-gradient(
-        ellipse 34% 29% at 18% 20%,
-        oklch(0.78 0.17 218 / var(--aurora-opacity)),
-        transparent 70%
+        ellipse 42% 36% at 18% 20%,
+        oklch(0.78 0.17 218 / var(--aurora-opacity)) 0%,
+        oklch(0.78 0.17 218 / calc(var(--aurora-opacity) * 0.82)) 18%,
+        oklch(0.78 0.17 218 / calc(var(--aurora-opacity) * 0.5)) 38%,
+        oklch(0.78 0.17 218 / calc(var(--aurora-opacity) * 0.22)) 60%,
+        oklch(0.78 0.17 218 / calc(var(--aurora-opacity) * 0.06)) 80%,
+        transparent 100%
       ),
       radial-gradient(
-        ellipse 32% 28% at 78% 18%,
-        oklch(0.78 0.18 155 / var(--aurora-opacity-2)),
-        transparent 70%
+        ellipse 40% 35% at 78% 18%,
+        oklch(0.78 0.18 155 / var(--aurora-opacity-2)) 0%,
+        oklch(0.78 0.18 155 / calc(var(--aurora-opacity-2) * 0.8)) 20%,
+        oklch(0.78 0.18 155 / calc(var(--aurora-opacity-2) * 0.48)) 40%,
+        oklch(0.78 0.18 155 / calc(var(--aurora-opacity-2) * 0.2)) 62%,
+        oklch(0.78 0.18 155 / calc(var(--aurora-opacity-2) * 0.05)) 82%,
+        transparent 100%
       ),
       radial-gradient(
-        ellipse 34% 26% at 54% 76%,
-        oklch(0.78 0.18 330 / calc(var(--aurora-opacity-2) * 0.8)),
-        transparent 72%
+        ellipse 42% 32% at 54% 76%,
+        oklch(0.78 0.18 330 / calc(var(--aurora-opacity-2) * 0.8)) 0%,
+        oklch(0.78 0.18 330 / calc(var(--aurora-opacity-2) * 0.6)) 22%,
+        oklch(0.78 0.18 330 / calc(var(--aurora-opacity-2) * 0.34)) 42%,
+        oklch(0.78 0.18 330 / calc(var(--aurora-opacity-2) * 0.14)) 64%,
+        oklch(0.78 0.18 330 / calc(var(--aurora-opacity-2) * 0.04)) 84%,
+        transparent 100%
       );
-    filter: blur(64px) saturate(120%);
     will-change: transform;
-    transform: translateZ(0);
+    transform: translate3d(0, 0, 0) scale(1);
     animation: aurora-drift 24s var(--ease-in-out-smooth) infinite alternate;
     contain: strict;
   }
 
+  /* Diagonal sheen: oversized and moved with `transform` instead of
+     animating `background-position` (which repaints every frame). */
   .aurora-shell::after {
     position: fixed;
-    inset: -12% -18%;
+    inset: -30% -40%;
     z-index: -1;
     pointer-events: none;
     content: "";
     opacity: 0.4;
     background: linear-gradient(
       104deg,
-      transparent 12%,
-      oklch(0.76 0.16 210 / 0.14) 32%,
-      transparent 55%,
-      oklch(0.8 0.16 325 / 0.1) 76%,
-      transparent 92%
+      transparent 6%,
+      oklch(0.76 0.16 210 / 0.05) 20%,
+      oklch(0.76 0.16 210 / 0.14) 30%,
+      oklch(0.76 0.16 210 / 0.06) 40%,
+      transparent 50%,
+      oklch(0.8 0.16 325 / 0.05) 68%,
+      oklch(0.8 0.16 325 / 0.1) 78%,
+      oklch(0.8 0.16 325 / 0.03) 88%,
+      transparent 96%
     );
-    background-size: 200% 200%;
-    filter: blur(40px);
-    will-change: transform, background-position;
-    transform: translateZ(0);
+    background-size: 160% 160%;
+    will-change: transform;
+    transform: translate3d(0, 0, 0);
     animation: aurora-wave 28s var(--ease-in-out-smooth) infinite alternate;
-    mix-blend-mode: var(--aurora-blend-2, overlay);
     contain: strict;
   }
 
+  /* Glass panels: real backdrop-filter blur removed. This is now just
+     the old no-blur fallback promoted to the default — a mostly-opaque
+     tinted surface plus a faint static sheen to keep a "glass" read
+     without asking the GPU to sample/blur what's behind it. */
   .aurora-surface {
-    background: color-mix(in oklch, var(--background) 66%, transparent);
-    -webkit-backdrop-filter: blur(24px) saturate(140%);
-    backdrop-filter: blur(24px) saturate(140%);
+    background: linear-gradient(
+        180deg,
+        oklch(1 0 0 / 0.05),
+        transparent 40%
+      ),
+      color-mix(in oklch, var(--background) 90%, transparent);
     box-shadow: var(--shadow-glow), var(--shadow-lg);
-  }
-
-  @supports not (backdrop-filter: blur(24px)) {
-    .aurora-surface {
-      background: color-mix(in oklch, var(--background) 92%, transparent);
-    }
   }
 
   .aurora-composer {
@@ -357,12 +404,14 @@
   }
 }
 
+/* Was a background-position tween; now a transform tween so the wave
+   layer is compositor-only, same as aurora-drift above. */
 @keyframes aurora-wave {
   0% {
-    background-position: 0% 30%;
+    transform: translate3d(-6%, -4%, 0);
   }
   100% {
-    background-position: 100% 60%;
+    transform: translate3d(6%, 5%, 0);
   }
 }
 
@@ -405,6 +454,18 @@ button {
   .aurora-shell::after,
   .aurora-composer::before {
     animation: none !important;
+  }
+}
+
+/* ─── Low-power / small-screen fallback ───
+   The animated glow is the single biggest remaining GPU cost. On
+   narrow / coarse-pointer devices (the ones most likely to hang),
+   freeze it to a static frame — same look, zero per-frame work. */
+@media (max-width: 640px), (pointer: coarse) and (max-height: 500px) {
+  .aurora-shell::before,
+  .aurora-shell::after {
+    animation: none !important;
+    transform: translate3d(0, 0, 0) !important;
   }
 }
 

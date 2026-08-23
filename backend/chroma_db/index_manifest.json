@@ -1,1 +1,0 @@
-{"status": "ingested", "backend": "chroma", "collection": "policy_docs", "embedding_model": "nvidia/nemotron-3-embed-1b:free", "documents": 3}

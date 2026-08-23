@@ -42,9 +42,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className="antialiased" suppressHydrationWarning>
+      <body className="h-dvh min-h-dvh w-screen overflow-hidden antialiased" suppressHydrationWarning>
         <Providers>
-          <div className="flex min-h-dvh max-h-dvh overflow-x-hidden aurora-shell">
+          <div className="flex h-full w-full aurora-shell">
             <Sidebar />
             {children}
           </div>

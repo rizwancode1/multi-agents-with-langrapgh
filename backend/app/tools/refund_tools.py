@@ -4,12 +4,12 @@ LangChain @tool decorated functions for creating and retrieving refund requests.
 """
 
 import uuid
-from typing import Optional
-from sqlalchemy.orm import Session
-from langchain_core.tools import tool
 
-from app.models_db import RefundRequest, Order, OrderItem
+from langchain_core.tools import tool
+from sqlalchemy.orm import Session
+
 from app.db import SessionLocal
+from app.models_db import Order, OrderItem, RefundRequest
 
 
 def _get_db() -> Session:
@@ -36,7 +36,7 @@ def refund_to_dict(refund: RefundRequest) -> dict:
 
 
 @tool
-def create_refund_request(order_id: str, reason: str, requested_amount: float, refund_method: Optional[str] = None, notes: Optional[str] = None) -> str:
+def create_refund_request(order_id: str, reason: str, requested_amount: float, refund_method: str | None = None, notes: str | None = None) -> str:
     """
     Create a new refund request in the database.
 

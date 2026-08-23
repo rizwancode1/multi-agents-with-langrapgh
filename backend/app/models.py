@@ -3,9 +3,10 @@ API Request and Response Models
 Pydantic models for input validation and response structure.
 """
 
-from pydantic import BaseModel, Field
+from datetime import UTC, datetime
 from typing import Literal
-from datetime import datetime, timezone
+
+from pydantic import BaseModel, Field
 
 
 class QueryRequest(BaseModel):
@@ -46,7 +47,7 @@ class QueryResponse(BaseModel):
     processing_time_ms: float = 0.0
     security_notes: list[str] = Field(default_factory=list)
     timestamp: str = Field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+        default_factory=lambda: datetime.now(UTC).isoformat()
     )
 
 

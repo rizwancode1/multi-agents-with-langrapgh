@@ -186,6 +186,10 @@ Open `http://localhost:3000`, create a conversation, and start asking about orde
 | POST | `/conversations` | Create a conversation |
 | GET | `/conversations/{id}` | Get a conversation with messages |
 | POST | `/conversations/{id}/messages` | Add a message to a conversation |
+| GET | `/tickets` | List agent-created tickets (filters: `status`, `priority`, `email`, `order_id`, `q`; pagination) |
+| GET | `/tickets/stats` | Ticket counts by status and priority |
+| GET | `/tickets/{ticket_id}` | Get a single ticket |
+| PATCH | `/tickets/{ticket_id}` | Update ticket status/priority |
 | GET | `/health` | Health check |
 | GET | `/metrics` | Metrics for monitoring dashboards |
 | GET | `/cache/stats` | Cache performance statistics |
@@ -213,18 +217,22 @@ Key settings live in `backend/app/config.py` and are overridable via `.env`:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `primary_model` | `openrouter/google/gemini-2.0-flash-exp:free` | LLM for all agents |
+| `fallback_model` | `openrouter/meta-llama/llama-3.3-70b-instruct:free` | Failover LLM (must differ from primary) |
 | `OPEN_ROUTER_API_KEY` | `""` | OpenRouter API key |
+| `API_KEY` | `""` | When set, mutating endpoints require an `X-API-Key` header (the Next.js proxy forwards `BACKEND_API_KEY`) |
 | `APP_ENV` | `development` | `production` enables 0.0.0.0 + multiple workers |
-| `RATE_LIMIT` | `20/minute` | API rate limit |
+| `RATE_LIMIT` | `20/minute` | API rate limit (Redis-shared in production when reachable) |
 | `CACHE_TTL_SECONDS` | `300` | Response cache TTL |
 | `CHECKPOINT_STORAGE` | `sqlite` | Checkpoint backend: `memory` or `sqlite` |
 | `CHECKPOINT_PATH` | `./checkpoints.db` | SQLite checkpoint file path |
 | `CACHE_BACKEND` | `auto` | `auto` (Redis in production, memory in dev), `memory`, or `redis` |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL for production cache |
 | `DATABASE_URL` | `sqlite:///./orders.db` | App database; point to PostgreSQL in production |
+| `DB_ECHO_LOGS` | `false` | Echo all SQL statements to the console (debugging) |
 | `USE_PGVECTOR` | `false` | Store embeddings in Postgres via PGVector instead of ChromaDB |
 | `RETRIEVAL_TOP_K` / `RERANK_TOP_K` | `10` / `5` | Hybrid retrieval candidates / context kept after reranking |
 | `MAX_RETRIEVAL_RETRIES` | `1` | Max query rewrites when retrieval fails |
+| `DEBUG_DRAW_GRAPH` | `false` | Render the mermaid graph PNG on startup (slow; needs network) |
 
 ## Running with Docker Compose
 

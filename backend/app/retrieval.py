@@ -6,7 +6,6 @@ partial evidence gathering.
 """
 
 import hashlib
-from typing import List, Optional, Dict
 
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
@@ -25,14 +24,14 @@ class HybridRetriever:
         self.vector_store = self.ingestion.load_vector_store()
         self.bm25_payload = self.ingestion.load_bm25_index()
 
-    def _dense_search(self, query: str, k: int, filter_dict: Optional[Dict] = None) -> List[tuple[Document, float]]:
+    def _dense_search(self, query: str, k: int, filter_dict: dict | None = None) -> list[tuple[Document, float]]:
         kwargs = {"k": k * 2}
         if filter_dict:
             kwargs["filter"] = filter_dict
         docs = self.vector_store.similarity_search_with_score(query, **kwargs)
         return [(doc, score) for doc, score in docs]
 
-    def _sparse_search(self, query: str, k: int) -> List[tuple[Document, float]]:
+    def _sparse_search(self, query: str, k: int) -> list[tuple[Document, float]]:
         if not self.bm25_payload:
             return []
         try:
@@ -41,7 +40,7 @@ class HybridRetriever:
             return []
 
         bm25: BM25Okapi = self.bm25_payload["bm25"]
-        docs: List[Document] = self.bm25_payload["docs"]
+        docs: list[Document] = self.bm25_payload["docs"]
 
         tokenized_query = bm25_tokenize(query)
         scores = bm25.get_scores(tokenized_query)
@@ -55,16 +54,16 @@ class HybridRetriever:
 
     def _rrf_fuse(
         self,
-        dense_results: List[tuple[Document, float]],
-        sparse_results: List[tuple[Document, float]],
+        dense_results: list[tuple[Document, float]],
+        sparse_results: list[tuple[Document, float]],
         top_k: int = 5,
         k: int = 60,
-        preserve_sources: Optional[List[str]] = None,
-    ) -> List[Document]:
+        preserve_sources: list[str] | None = None,
+    ) -> list[Document]:
         """Reciprocal Rank Fusion with optional source diversity preservation."""
         scores: dict[str, tuple[Document, float]] = {}
 
-        def _add(results: List[tuple[Document, float]], weight: float = 1.0):
+        def _add(results: list[tuple[Document, float]], weight: float = 1.0):
             for rank, (doc, _) in enumerate(results, start=1):
                 key = (
                     doc.metadata.get("chunk_id")
@@ -85,9 +84,9 @@ class HybridRetriever:
         fused = sorted(scores.values(), key=lambda x: x[1], reverse=True)
 
         if preserve_sources:
-            selected: List[Document] = []
+            selected: list[Document] = []
             seen_sources = set()
-            for doc, score in fused:
+            for doc, _score in fused:
                 source = doc.metadata.get("source", "")
                 if source in preserve_sources and source not in seen_sources:
                     selected.append(doc)
@@ -96,15 +95,15 @@ class HybridRetriever:
                     selected.append(doc)
             return selected[:top_k]
 
-        return [doc for doc, score in fused[:top_k]]
+        return [doc for doc, _score in fused[:top_k]]
 
     def retrieve(
         self,
         query: str,
-        top_k: Optional[int] = None,
-        filter_dict: Optional[Dict] = None,
-        preserve_sources: Optional[List[str]] = None,
-    ) -> List[Document]:
+        top_k: int | None = None,
+        filter_dict: dict | None = None,
+        preserve_sources: list[str] | None = None,
+    ) -> list[Document]:
         """Retrieve top-k documents using hybrid dense + BM25 search."""
         top_k = top_k or self.settings.retrieval_top_k
         dense = self._dense_search(query, top_k, filter_dict=filter_dict)
@@ -114,12 +113,12 @@ class HybridRetriever:
     def retrieve_complementary(
         self,
         original_query: str,
-        missing_aspects: List[str],
-        existing_sources: List[str],
+        missing_aspects: list[str],
+        existing_sources: list[str],
         top_k: int = 5,
-    ) -> List[Document]:
+    ) -> list[Document]:
         """Retrieve complementary evidence for missing aspects while avoiding already-seen sources."""
-        all_docs: List[Document] = []
+        all_docs: list[Document] = []
         seen_ids = set()
 
         for aspect in missing_aspects:
@@ -145,9 +144,9 @@ class HybridRetriever:
 class HybridRetrieverWrapper(BaseRetriever):
     """LangChain BaseRetriever wrapper around HybridRetriever."""
 
-    def _get_relevant_documents(self, query: str) -> List[Document]:
+    def _get_relevant_documents(self, query: str) -> list[Document]:
         retriever = HybridRetriever()
         return retriever.retrieve(query)
 
-    async def _aget_relevant_documents(self, query: str) -> List[Document]:
+    async def _aget_relevant_documents(self, query: str) -> list[Document]:
         return self._get_relevant_documents(query)

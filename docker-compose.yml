@@ -14,11 +14,16 @@ services:
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-multi-agent-system}
       CHECKPOINT_STORAGE: ${CHECKPOINT_STORAGE:-sqlite}
-      CHECKPOINT_PATH: /app/checkpoints.db
+      CHECKPOINT_PATH: /app/data/checkpoints.db
       RATE_LIMIT: ${RATE_LIMIT:-20/minute}
       CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-300}
+      API_KEY: ${API_KEY:-}
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////app/data/orders.db}
+      CHROMA_PERSIST_DIR: /app/data/chroma_db
     volumes:
-      - backend_data:/app
+      # Persist ONLY runtime data. Mounting a named volume over /app would
+      # shadow image contents and serve stale code after upgrades.
+      - backend_data:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
       interval: 30s
@@ -35,7 +40,9 @@ services:
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://backend:8000}
+      # Server-side proxy target (Next.js API routes run in Node, not the browser).
+      API_URL: ${NEXT_PUBLIC_API_URL:-http://backend:8000}
+      BACKEND_API_KEY: ${API_KEY:-}
     depends_on:
       backend:
         condition: service_healthy

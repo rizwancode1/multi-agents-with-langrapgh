@@ -2,13 +2,13 @@
 Conversation API endpoints.
 """
 
-from typing import List, Optional
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import selectinload
 
+from app.auth import require_api_key
 from app.db import db_session
 from app.models_db import Conversation, ConversationMessage
 
@@ -19,7 +19,7 @@ class MessageResponse(BaseModel):
     id: int
     role: str
     text: str
-    status: Optional[str] = None
+    status: str | None = None
     time: str
     created_at: str
 
@@ -29,8 +29,8 @@ class ConversationResponse(BaseModel):
     title: str
     customer: str
     status: str
-    thread_id: Optional[str] = None
-    messages: List[MessageResponse]
+    thread_id: str | None = None
+    messages: list[MessageResponse]
     created_at: str
     updated_at: str
 
@@ -44,7 +44,7 @@ class CreateConversationRequest(BaseModel):
 class AddMessageRequest(BaseModel):
     role: str
     text: str
-    status: Optional[str] = None
+    status: str | None = None
 
 
 def _message_to_response(msg: ConversationMessage) -> MessageResponse:
@@ -54,12 +54,12 @@ def _message_to_response(msg: ConversationMessage) -> MessageResponse:
         text=msg.text,
         status=msg.status,
         time=msg.created_at.strftime("%I:%M %p") if msg.created_at else "Just now",
-        created_at=msg.created_at.isoformat() if msg.created_at else datetime.now(timezone.utc).isoformat(),
+        created_at=msg.created_at.isoformat() if msg.created_at else datetime.now(UTC).isoformat(),
     )
 
 
 def _conversation_to_response(conv: Conversation) -> ConversationResponse:
-    messages = sorted(conv.messages, key=lambda m: m.created_at or datetime.min)
+    messages = sorted(conv.messages, key=lambda m: m.created_at or datetime.min.replace(tzinfo=UTC))
     return ConversationResponse(
         id=conv.id,
         title=conv.title,
@@ -67,12 +67,12 @@ def _conversation_to_response(conv: Conversation) -> ConversationResponse:
         status=conv.status,
         thread_id=conv.thread_id,
         messages=[_message_to_response(m) for m in messages],
-        created_at=conv.created_at.isoformat() if conv.created_at else datetime.now(timezone.utc).isoformat(),
-        updated_at=conv.updated_at.isoformat() if conv.updated_at else datetime.now(timezone.utc).isoformat(),
+        created_at=conv.created_at.isoformat() if conv.created_at else datetime.now(UTC).isoformat(),
+        updated_at=conv.updated_at.isoformat() if conv.updated_at else datetime.now(UTC).isoformat(),
     )
 
 
-def get_conversation_thread_id(conversation_id: int) -> Optional[str]:
+def get_conversation_thread_id(conversation_id: int) -> str | None:
     """Return the LangGraph thread id for a conversation.
 
     Persists the mapping on first use so old conversations get backfilled.
@@ -87,13 +87,13 @@ def get_conversation_thread_id(conversation_id: int) -> Optional[str]:
         return conv.thread_id
 
 
-def get_conversation_messages(conversation_id: int) -> List[dict]:
+def get_conversation_messages(conversation_id: int) -> list[dict]:
     """Return all persisted messages for a conversation as {role, text} dicts."""
     with db_session() as db:
         conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
         if not conv:
             return []
-        messages = sorted(conv.messages, key=lambda m: m.created_at or datetime.min)
+        messages = sorted(conv.messages, key=lambda m: m.created_at or datetime.min.replace(tzinfo=UTC))
         return [{"role": m.role, "text": m.text} for m in messages]
 
 
@@ -101,8 +101,8 @@ def save_conversation_message(
     conversation_id: int,
     role: str,
     text: str,
-    status: Optional[str] = None,
-) -> Optional[MessageResponse]:
+    status: str | None = None,
+) -> MessageResponse | None:
     """Persist a message to a conversation.
 
     Returns the saved message, or None if the conversation does not exist.
@@ -130,20 +130,26 @@ def save_conversation_message(
         return _message_to_response(msg)
 
 
-@router.get("/", response_model=List[ConversationResponse])
-async def list_conversations():
+@router.get("/", response_model=list[ConversationResponse])
+async def list_conversations(
+    limit: int = Query(default=50, ge=1, le=200, description="Max conversations returned"),
+    offset: int = Query(default=0, ge=0, description="Pagination offset"),
+):
+    """List conversations (paginated), newest activity first."""
     with db_session() as db:
         conversations = (
             db.query(Conversation)
             .options(selectinload(Conversation.messages))
             .order_by(Conversation.updated_at.desc())
+            .offset(offset)
+            .limit(limit)
             .all()
         )
         return [_conversation_to_response(c) for c in conversations]
 
 
 @router.post("/", response_model=ConversationResponse)
-async def create_conversation(body: CreateConversationRequest):
+async def create_conversation(body: CreateConversationRequest, _auth: None = Depends(require_api_key)):
     with db_session() as db:
         conv = Conversation(
             title=body.title,
@@ -167,7 +173,7 @@ async def get_conversation(conversation_id: int):
 
 
 @router.post("/{conversation_id}/messages", response_model=MessageResponse)
-async def add_message(conversation_id: int, body: AddMessageRequest):
+async def add_message(conversation_id: int, body: AddMessageRequest, _auth: None = Depends(require_api_key)):
     with db_session() as db:
         conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
         if not conv:
