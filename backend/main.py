@@ -2,7 +2,6 @@ import os
 
 import uvicorn
 
-from app.api import app
 from app.config import get_settings
 
 settings = get_settings()

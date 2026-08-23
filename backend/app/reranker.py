@@ -100,7 +100,7 @@ Respond with EXACTLY one line per chunk in this format and nothing else:
 
         scores = self._score_batch(question, documents)
         scored = []
-        for doc, score in zip(documents, scores):
+        for doc, score in zip(documents, scores, strict=False):
             doc.metadata["rerank_score"] = score
             scored.append((doc, score))
 

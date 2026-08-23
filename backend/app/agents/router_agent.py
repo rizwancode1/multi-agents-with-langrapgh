@@ -136,6 +136,6 @@ def router_node(state: AgentState):
         "handoff_reason": reason,
         "intents": intents,
         "order_id": order_id,
-        "visited_agents": state.get("visited_agents", []) + ["router"],
+        "visited_agents": [*state.get("visited_agents", []), "router"],
         "route": add_route(state, "router", f"route_to_{agent}"),
     }

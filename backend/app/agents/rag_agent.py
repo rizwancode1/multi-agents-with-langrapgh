@@ -501,7 +501,7 @@ def rag_node(state: AgentState):
         "is_grounded": result.get("is_grounded", False),
         "rag_trace": result.get("trace", []),
         "next_agent": "evaluator",
-        "visited_agents": state.get("visited_agents", []) + ["rag"],
+        "visited_agents": [*state.get("visited_agents", []), "rag"],
         "handoff_count": state.get("handoff_count", 0),
         "route": add_route(state, "rag", "agentic_rag"),
     }

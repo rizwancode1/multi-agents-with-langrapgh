@@ -3,14 +3,13 @@ Support Ticket Tools
 LangChain @tool decorated functions for creating and retrieving support tickets.
 """
 
-import re
 import uuid
-from typing import Optional
-from sqlalchemy.orm import Session
-from langchain_core.tools import tool
 
-from app.models_db import SupportTicket
+from langchain_core.tools import tool
+from sqlalchemy.orm import Session
+
 from app.db import SessionLocal
+from app.models_db import SupportTicket
 
 
 def _get_db() -> Session:
@@ -37,7 +36,7 @@ def ticket_to_dict(ticket: SupportTicket) -> dict:
 
 
 @tool
-def create_support_ticket(customer_name: str, customer_email: str, subject: str, description: str, priority: str = "medium", order_id: Optional[str] = None) -> str:
+def create_support_ticket(customer_name: str, customer_email: str, subject: str, description: str, priority: str = "medium", order_id: str | None = None) -> str:
     """
     Create a new support ticket in the database.
 

@@ -122,7 +122,7 @@ def bm25_tokenize(text: str) -> list[str]:
     and normalizing punctuation carefully.
     """
     text = text.lower()
-    text = re.sub(r"[-–—]", " ", text)
+    text = re.sub(r"[-\u2013\u2014]", " ", text)
     text = re.sub(r"\.{2,}", " ", text)
     tokens = re.findall(r"[a-z0-9_]+", text)
     return [t for t in tokens if len(t) > 1]

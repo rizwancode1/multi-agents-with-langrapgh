@@ -4,12 +4,12 @@ LangChain @tool decorated functions for retrieving order information from the da
 """
 
 import re
-from typing import Optional
-from sqlalchemy.orm import Session
-from langchain_core.tools import tool
 
-from app.models_db import Order, OrderItem
+from langchain_core.tools import tool
+from sqlalchemy.orm import Session
+
 from app.db import SessionLocal
+from app.models_db import Order, OrderItem
 
 
 def _get_db() -> Session:

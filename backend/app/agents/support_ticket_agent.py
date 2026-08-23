@@ -103,7 +103,7 @@ def support_ticket_node(state: AgentState):
         "current_agent": "support_ticket",
         "response": response_text,
         "next_agent": "evaluator",
-        "visited_agents": state.get("visited_agents", []) + ["support_ticket"],
+        "visited_agents": [*state.get("visited_agents", []), "support_ticket"],
         "handoff_count": state.get("handoff_count", 0),
         "route": add_route(state, "support_ticket", "handle_support_ticket"),
     }

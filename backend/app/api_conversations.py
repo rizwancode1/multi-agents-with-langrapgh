@@ -59,7 +59,7 @@ def _message_to_response(msg: ConversationMessage) -> MessageResponse:
 
 
 def _conversation_to_response(conv: Conversation) -> ConversationResponse:
-    messages = sorted(conv.messages, key=lambda m: m.created_at or datetime.min.replace(tzinfo=timezone.utc))
+    messages = sorted(conv.messages, key=lambda m: m.created_at or datetime.min.replace(tzinfo=UTC))
     return ConversationResponse(
         id=conv.id,
         title=conv.title,
@@ -93,7 +93,7 @@ def get_conversation_messages(conversation_id: int) -> list[dict]:
         conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
         if not conv:
             return []
-        messages = sorted(conv.messages, key=lambda m: m.created_at or datetime.min.replace(tzinfo=timezone.utc))
+        messages = sorted(conv.messages, key=lambda m: m.created_at or datetime.min.replace(tzinfo=UTC))
         return [{"role": m.role, "text": m.text} for m in messages]
 
 

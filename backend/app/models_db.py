@@ -3,18 +3,17 @@ Database ORM Models
 SQLAlchemy models for the orders database.
 """
 
+from datetime import UTC, datetime
+
 from sqlalchemy import (
-    Column,
-    String,
-    Float,
-    Integer,
     DateTime,
+    Float,
     ForeignKey,
-    create_engine,
+    Integer,
+    String,
 )
 from sqlalchemy.dialects.sqlite import JSON as SQLiteJSON
-from sqlalchemy.orm import declarative_base, relationship, Mapped, mapped_column
-from datetime import datetime, timezone
+from sqlalchemy.orm import Mapped, declarative_base, mapped_column, relationship
 
 Base = declarative_base()
 
@@ -37,8 +36,8 @@ class Order(Base):
     tax: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     shipping_fee: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     total: Mapped[float] = mapped_column(Float, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
     items: Mapped[list["OrderItem"]] = relationship(back_populates="order", cascade="all, delete-orphan")
 
@@ -53,7 +52,7 @@ class OrderItem(Base):
     name: Mapped[str] = mapped_column(String(300), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     unit_price: Mapped[float] = mapped_column(Float, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
     order: Mapped["Order"] = relationship(back_populates="items")
 
@@ -71,8 +70,8 @@ class SupportTicket(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False, index=True, default="open")
     priority: Mapped[str] = mapped_column(String(20), nullable=False, default="medium")
     order_id: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
 
 class RefundRequest(Base):
@@ -87,7 +86,7 @@ class RefundRequest(Base):
     requested_amount: Mapped[float] = mapped_column(Float, nullable=False)
     approved_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
     refund_method: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    requested_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    requested_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
     processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     notes: Mapped[str | None] = mapped_column(String(1000), nullable=True)
 
@@ -101,8 +100,8 @@ class Conversation(Base):
     title: Mapped[str] = mapped_column(String(300), nullable=False)
     customer_name: Mapped[str] = mapped_column(String(200), nullable=False, default="Unassigned")
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="Open", index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
     messages: Mapped[list["ConversationMessage"]] = relationship(back_populates="conversation", cascade="all, delete-orphan")
 
@@ -116,6 +115,6 @@ class ConversationMessage(Base):
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     text: Mapped[str] = mapped_column(String(4000), nullable=False)
     status: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
     conversation: Mapped["Conversation"] = relationship(back_populates="messages")

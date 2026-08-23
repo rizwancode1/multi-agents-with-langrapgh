@@ -5,11 +5,12 @@ Run this script once to bootstrap the database.
 """
 
 import json
+from datetime import datetime
 from pathlib import Path
-from datetime import datetime, timezone
-from app.db import init_db, get_db
-from app.models_db import Order, OrderItem, SupportTicket, RefundRequest
+
 from app.config import get_settings
+from app.db import get_db, init_db
+from app.models_db import Order, OrderItem, SupportTicket
 
 settings = get_settings()
 ORDERS_JSON_PATH = Path(__file__).resolve().parent / "data" / "orders.json"
@@ -21,7 +22,7 @@ def seed_orders():
         print(f"Orders JSON not found at {ORDERS_JSON_PATH}")
         return
 
-    with open(ORDERS_JSON_PATH, "r", encoding="utf-8") as f:
+    with open(ORDERS_JSON_PATH, encoding="utf-8") as f:
         orders_data = json.load(f)
 
     db = get_db()

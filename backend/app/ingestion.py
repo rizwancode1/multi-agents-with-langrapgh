@@ -10,6 +10,7 @@ Vector backend is selected by USE_PGVECTOR:
 BM25 always persists locally as a pickle alongside the vector index.
 """
 
+import contextlib
 import hashlib
 import json
 import pickle
@@ -62,7 +63,7 @@ class IngestionPipeline:
         if not self.kb_path.exists():
             raise FileNotFoundError(f"Knowledge base not found: {self.kb_path}")
 
-        with open(self.kb_path, "r", encoding="utf-8") as f:
+        with open(self.kb_path, encoding="utf-8") as f:
             entries = json.load(f)
 
         documents: list[Document] = []
@@ -134,14 +135,13 @@ class IngestionPipeline:
             self.persist_dir.mkdir(parents=True, exist_ok=True)
             # Drop any previous version of this collection so a rebuild never
             # accumulates duplicates next to stale chunks.
-            try:
+            with contextlib.suppress(Exception):
+                # Raises on first run / nothing to clean.
                 Chroma(
                     embedding_function=embeddings,
                     persist_directory=str(self.persist_dir),
                     collection_name=self.collection_name,
                 ).delete_collection()
-            except Exception:
-                pass  # First run / nothing to clean
             self.vector_store = Chroma.from_documents(
                 documents=chunks,
                 embedding=embeddings,

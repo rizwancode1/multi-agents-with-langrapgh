@@ -25,7 +25,7 @@ class JSONFormatter(logging.Formatter):
         if hasattr(record, "extra_data"):
             log_obj.update(record.extra_data)
         return json.dumps(log_obj)
-    
+
 def get_logger(name: str = "production-api") -> logging.Logger:
     """Create a structured JSON logger."""
     logger = logging.getLogger(name)
@@ -37,7 +37,7 @@ def get_logger(name: str = "production-api") -> logging.Logger:
         logger.setLevel(logging.INFO)
 
     return logger
-    
+
 
 
 # === Metrics Collector ===
@@ -189,8 +189,8 @@ class RequestTimer:
 
     def __exit__(self, *args):
         self.elapsed_ms = (time.time() - self.start) * 1000
-        
-        
+
+
 # uv run python -c "
 # from app.monitoring import get_logger, MetricsCollector, RequestTimer
 # import time

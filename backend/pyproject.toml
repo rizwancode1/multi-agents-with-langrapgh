@@ -34,3 +34,30 @@ dev = [
     "pytest>=9.0.2",
     "ruff>=0.8.0",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# Explicit selection so lint results don't shift when the default rule set
+# changes across ruff versions.
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # import sorting
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "C4",  # comprehensions
+    "SIM", # simplify
+    "RUF", # ruff-specific
+]
+ignore = [
+    "E501",  # long lines: LLM prompts / structured logs read better unwrapped
+    "B008",  # function call in argument defaults — FastAPI Depends() pattern
+]
+
+[tool.ruff.lint.per-file-ignores]
+# conftest.py sets env vars before app imports on purpose.
+"tests/**" = ["E402"]

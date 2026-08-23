@@ -2,7 +2,7 @@
 
 import time
 
-from app.cache import ResponseCache, create_cache
+from app.cache import ResponseCache
 
 
 def test_response_cache_hit_and_miss():
@@ -41,10 +41,9 @@ def test_stats_shape():
 
 
 def test_create_cache_memory_backend():
-    cache = create_cache.__wrapped__ if hasattr(create_cache, "__wrapped__") else None
     # Explicit memory backend must never touch Redis
-    from app.cache import ResponseCache as RC
     import app.cache as cache_module
+    from app.cache import ResponseCache as RC
 
     original = cache_module.get_settings
 

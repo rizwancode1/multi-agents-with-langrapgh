@@ -233,7 +233,7 @@ def order_node(state: AgentState):
         "response": response_text,
         "next_agent": next_agent,
         "handoff_reason": "Order data retrieved, ready for evaluation.",
-        "visited_agents": state.get("visited_agents", []) + ["order"],
+        "visited_agents": [*state.get("visited_agents", []), "order"],
         "handoff_count": state.get("handoff_count", 0),
         "route": add_route(state, "order", "lookup_order_handoff_to_evaluator"),
     }

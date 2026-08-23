@@ -69,7 +69,7 @@ def formatter_node(state: AgentState):
     return {
         "current_agent": "formatter",
         "response": response_text,
-        "visited_agents": state.get("visited_agents", []) + ["formatter"],
+        "visited_agents": [*state.get("visited_agents", []), "formatter"],
         "handoff_count": state.get("handoff_count", 0),
         "route": add_route(state, "formatter", "format_response"),
     }

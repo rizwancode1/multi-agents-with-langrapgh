@@ -42,6 +42,13 @@ const AGENT_STATUS_LABELS: Record<string, string> = {
   groundedness_check: "Verifying the answer…",
 };
 
+type StreamEventLike = {
+  type: "status" | "step" | "error" | "done";
+  agent?: string | null;
+  message?: string | null;
+  response?: string | null;
+};
+
 export default function Page() {
   const queryClient = useQueryClient();
   const { theme, setTheme } = useTheme();
@@ -192,9 +199,9 @@ export default function Page() {
           if (!line.startsWith("data: ")) continue;
           const raw = line.slice(6).trim();
           if (!raw) continue;
-          let event: any;
+          let event: StreamEventLike;
           try {
-            event = JSON.parse(raw);
+            event = JSON.parse(raw) as StreamEventLike;
           } catch {
             continue;
           }
@@ -233,7 +240,8 @@ export default function Page() {
       }
     } catch (err) {
       setPendingAssistantId(null);
-      if (requestIdRef.current === requestId && (err as any)?.name !== "AbortError") {
+      const isAbort = err instanceof Error && err.name === "AbortError";
+      if (requestIdRef.current === requestId && !isAbort) {
         updateAssistantMessage(active.id, statusMessage.id!, {
           text: "Something went wrong while reaching the assistant. Please try again.",
           status: "Error",

@@ -3,6 +3,7 @@ Database Connection and Session Management
 SQLAlchemy engine, session factory, and initialization helpers.
 """
 
+import contextlib
 from contextlib import contextmanager
 
 from sqlalchemy import create_engine
@@ -87,10 +88,8 @@ def init_db():
         else:
             # Postgres/other: statements are written to be safely re-runnable.
             for statement in MIGRATIONS:
-                try:
+                with contextlib.suppress(Exception):
                     conn.execute(text(statement))
-                except Exception:
-                    pass
             conn.commit()
 
 

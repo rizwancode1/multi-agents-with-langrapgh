@@ -5,18 +5,18 @@ Uses the isolated temporary SQLite database configured in conftest.py,
 so the dev orders.db is never touched.
 """
 
-from datetime import datetime, timedelta, timezone  # noqa: E402
+from datetime import UTC, datetime, timedelta
 
-import pytest  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
+import pytest
+from fastapi.testclient import TestClient
 
-from app.api import app as fastapi_app  # noqa: E402
-from app.db import init_db  # noqa: E402
-from app.models_db import SupportTicket  # noqa: E402
+from app.api import app as fastapi_app
+from app.db import init_db
+from app.models_db import SupportTicket
 
 client = TestClient(fastapi_app)
 
-NOW = datetime.now(timezone.utc)
+NOW = datetime.now(UTC)
 
 
 def _seed():

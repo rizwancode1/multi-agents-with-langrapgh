@@ -11,6 +11,7 @@ Wires together:
 """
 
 import asyncio
+import contextlib
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -373,7 +374,7 @@ async def query_agents(request: Request, body: QueryRequest, _auth: None = Depen
             raise HTTPException(
                 status_code=500,
                 detail="An error occurred while processing your request.",
-            )
+            ) from e
 
         response_text = result.get("response", "")
         visited = result.get("visited_agents", [])
@@ -626,10 +627,8 @@ async def stream_query(request: Request, body: QueryRequest, _auth: None = Depen
         finally:
             if not task.done():
                 task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
 
         if final_output:
             response_text = final_output.get("response", "")

@@ -113,7 +113,7 @@ def return_refund_node(state: AgentState):
         "response": response_text,
         "return_refund_data": return_refund_summary,
         "next_agent": "evaluator",
-        "visited_agents": state.get("visited_agents", []) + ["return_refund"],
+        "visited_agents": [*state.get("visited_agents", []), "return_refund"],
         "handoff_count": state.get("handoff_count", 0),
         "route": add_route(state, "return_refund", "process_return_refund"),
     }

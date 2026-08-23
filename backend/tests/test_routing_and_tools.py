@@ -8,17 +8,16 @@ parsing, the RAG sub-graph loop bounds, and the multi-round tool executor.
 
 import pytest
 
+from app.agents.evaluator_agent import _safe_default_evaluation, evaluator_router
 from app.agents.graph import (
     AGENT_CAPABILITIES,
     MAX_HANDOFFS_PER_REQUEST,
     MAX_VISITS_PER_AGENT,
     resolve_next_agent,
 )
-from app.agents.evaluator_agent import _safe_default_evaluation, evaluator_router
 from app.agents.order_agent import _format_order_summary, _parse_tool_result
 from app.agents.rag_agent import route_after_answer_eval, route_after_grade_context
 from app.agents.router_agent import _extract_intents_fallback, _fallback_route
-
 
 # === Router fallbacks ===
 
@@ -225,7 +224,7 @@ def test_tool_loop_executes_and_feeds_results_back():
         fake_ai(content="final answer"),
     ])
     from app.agents.tool_loop import run_tool_loop
-    answer, executed = run_tool_loop(llm, None, {}, [FakeTool("tool_a")])
+    _answer, executed = run_tool_loop(llm, None, {}, [FakeTool("tool_a")])
 
     assert executed == [{"tool": "tool_a", "args": {"x": 1}, "result": "tool_a({'x': 1}) ok"}]
     assert len(llm.calls) == 2
