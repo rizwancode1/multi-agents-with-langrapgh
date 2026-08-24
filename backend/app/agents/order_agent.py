@@ -10,7 +10,6 @@ from app.agents.tool_loop import run_tool_loop, successful_results
 from app.config import get_settings
 from app.monitoring import get_logger
 from app.tools.order_tools import (
-    get_order_by_customer_name,
     get_order_by_id,
     get_order_items,
     get_orders_by_email,
@@ -80,21 +79,26 @@ ORDER_PROMPT = ChatPromptTemplate.from_messages([
         "system",
         "You are an order assistant. Your job is to retrieve customer order information from the database using the available tools."
         "\n\nYou have access to the following tools:"
-        "\n- search_orders: Search orders by order ID, customer name, or email (main lookup tool)"
+        "\n- search_orders: Search orders by order ID or customer email (main lookup tool)"
         "\n- get_order_by_id: Retrieve order details by exact order ID"
-        "\n- get_order_by_customer_name: Retrieve the most recent order for a customer by name"
         "\n- get_orders_by_email: Retrieve ALL orders for a customer by email address"
         "\n- get_order_items: Retrieve line items for a specific order"
+        "\n\nPRIVACY & VERIFICATION RULES (highest priority):"
+        "\n1. NEVER disclose, look up, list, or export another customer's information."
+        "\n2. NEVER return bulk records (e.g. 'all users', 'all emails', 'every order in the database'). Refuse politely and briefly."
+        "\n3. Only retrieve data when the user provides THEIR OWN identifier: their email address, or an order ID (ORD-...) from this conversation."
+        "\n4. If no identifier is present in the request or conversation history, do NOT call any tool and do NOT guess. Ask the user to share the email address or order ID they used for the purchase."
+        "\n5. Name-only lookups are disabled: never attempt to find orders by a person's name."
         "\n\nCRITICAL RULES:"
-        "\n1. When the user provides an email address, ALWAYS use get_orders_by_email. It returns a LIST of ALL orders for that email. Do NOT limit to one order."
-        "\n2. When the user asks for 'all orders', 'order history', or 'total spend', you MUST:"
+        "\n6. When the user provides an email address, ALWAYS use get_orders_by_email. It returns a LIST of ALL orders for that email. Do NOT limit to one order."
+        "\n7. When the user asks for 'all orders', 'order history', or 'total spend' (for their own verified identity), you MUST:"
         "\n   - Retrieve ALL orders for the customer"
         "\n   - Calculate the total spend by summing the 'total' field from each order's payment info"
         "\n   - Present ALL orders and the calculated total"
-        "\n3. Do not infer or make up order information. Use ONLY the data returned by the tools."
-        "\n4. If the tool returns an empty list or error, clearly state that no orders were found."
-        "\n5. You may call multiple tools in sequence (e.g. look up the order, then fetch its items). Tool results are returned to you so you can decide the next call."
-        "\n6. {handoff_feedback}"
+        "\n8. Do not infer or make up order information. Use ONLY the data returned by the tools."
+        "\n9. If the tool returns an empty list or error, clearly state that no orders were found."
+        "\n10. You may call multiple tools in sequence (e.g. look up the order, then fetch its items). Tool results are returned to you so you can decide the next call."
+        "\n11. {handoff_feedback}"
         ,
     ),
     (
@@ -107,7 +111,6 @@ ORDER_PROMPT = ChatPromptTemplate.from_messages([
 ORDER_TOOLS: list[BaseTool] = [
     search_orders,
     get_order_by_id,
-    get_order_by_customer_name,
     get_orders_by_email,
     get_order_items,
 ]
@@ -205,7 +208,7 @@ def order_node(state: AgentState):
                 order_data, order_id, response_text = fb_orders, fb_order_id, fb_response
             else:
                 response_text = answer.content if (answer and answer.content) else \
-                    "I couldn't find matching order information. Please provide your order ID, name, or email."
+                    "I couldn't find matching order information. Please provide your order ID or the email address you used for the purchase."
 
     except Exception as e:
         order_data = []
@@ -232,6 +235,9 @@ def order_node(state: AgentState):
         "order_id": order_id,
         "response": response_text,
         "next_agent": next_agent,
+        # Data retrieved -> slot fulfilled. Otherwise keep waiting for the
+        # user's identifier so their next turn resumes here directly.
+        "awaiting_slot": None if order_data else "order_identifier",
         "handoff_reason": "Order data retrieved, ready for evaluation.",
         "visited_agents": [*state.get("visited_agents", []), "order"],
         "handoff_count": state.get("handoff_count", 0),

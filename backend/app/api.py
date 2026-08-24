@@ -26,7 +26,8 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from langsmith import traceable
+import langsmith as ls
+from langsmith import get_current_run_tree, traceable
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -98,6 +99,7 @@ AGENT_NODES = {
     "return_refund",
     "evaluator",
     "formatter",
+    "out_of_scope",
 }
 
 
@@ -314,6 +316,66 @@ async def query_agents(request: Request, body: QueryRequest, _auth: None = Depen
                 detail="Your message was blocked by our security filters.",
             )
 
+        # ---- Step 1a: Safety guardrail — refuse destructive/admin actions ----
+        if any("safety_guardrail:destructive_action" in n for n in notes):
+            logger.warning("safety_guardrail_blocked", extra={"extra_data": {
+                "query": body.query[:200],
+                "guardrail": "destructive_action",
+            }})
+            metrics.record_request(latency_ms=0)
+            denial = (
+                "I can't perform administrative or destructive actions like deleting data "
+                "or modifying systems. I'm here to help with your orders, returns and refunds, "
+                "shipping questions, and support tickets — how can I assist with one of those?"
+            )
+            return QueryResponse(
+                query=body.query,
+                response=denial,
+                entry_agent="security",
+                final_agent="security",
+                visited_agents=["security"],
+                route=[{"from": "security", "action": "blocked_destructive_action"}],
+                intents=["out_of_scope"],
+                order_id=None,
+                retrieved_documents=[],
+                citations=None,
+                cached=False,
+                processing_time_ms=0,
+                security_notes=notes,
+                thread_id=str(uuid.uuid4()),
+                conversation_id=body.conversation_id,
+            )
+
+        # ---- Step 1a: Privacy guardrail — deny bulk / cross-user data access ----
+        if any("privacy_guardrail:bulk_data_access" in n for n in notes):
+            logger.warning("privacy_guardrail_blocked", extra={"extra_data": {
+                "query": body.query[:200],
+                "guardrail": "bulk_data_access",
+            }})
+            metrics.record_request(latency_ms=0)
+            denial = (
+                "I'm sorry, but I can't list or share other customers' information or bulk records. "
+                "If this is about your own order or ticket, please share the email address or order ID "
+                "you used and I'll be happy to help."
+            )
+            return QueryResponse(
+                query=body.query,
+                response=denial,
+                entry_agent="security",
+                final_agent="security",
+                visited_agents=["security"],
+                route=[{"from": "security", "action": "blocked_bulk_data_access"}],
+                intents=["privacy_violation"],
+                order_id=None,
+                retrieved_documents=[],
+                citations=None,
+                cached=False,
+                processing_time_ms=0,
+                security_notes=notes,
+                thread_id=str(uuid.uuid4()),
+                conversation_id=body.conversation_id,
+            )
+
         # ---- Step 1b: Persist the user message ----
         if body.conversation_id:
             save_conversation_message(body.conversation_id, "user", body.query)
@@ -474,6 +536,80 @@ async def stream_query(request: Request, body: QueryRequest, _auth: None = Depen
             detail="Your message was blocked by our security filters.",
         )
 
+    # ---- Safety guardrail — refuse destructive/admin actions ----
+    if any("safety_guardrail:destructive_action" in n for n in _notes):
+        logger.warning("safety_guardrail_blocked", extra={"extra_data": {
+            "query": body.query[:200],
+            "guardrail": "destructive_action",
+        }})
+        metrics.record_request(latency_ms=0)
+        denial = (
+            "I can't perform administrative or destructive actions like deleting data "
+            "or modifying systems. I'm here to help with your orders, returns and refunds, "
+            "shipping questions, and support tickets — how can I assist with one of those?"
+        )
+        if body.conversation_id:
+            save_conversation_message(body.conversation_id, "assistant", denial)
+        event = StreamEvent(
+            type="done",
+            response=denial,
+            data={
+                "entry_agent": "security",
+                "final_agent": "security",
+                "visited_agents": ["security"],
+                "route": [{"from": "security", "action": "blocked_destructive_action"}],
+                "intents": ["out_of_scope"],
+                "thread_id": body.thread_id,
+                "conversation_id": body.conversation_id,
+            },
+        )
+        return StreamingResponse(
+            iter([f"data: {event.model_dump_json()}\n\n"]),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # ---- Privacy guardrail — deny bulk / cross-user data access ----
+    if any("privacy_guardrail:bulk_data_access" in n for n in _notes):
+        logger.warning("privacy_guardrail_blocked", extra={"extra_data": {
+            "query": body.query[:200],
+            "guardrail": "bulk_data_access",
+        }})
+        metrics.record_request(latency_ms=0)
+        denial = (
+            "I'm sorry, but I can't list or share other customers' information or bulk records. "
+            "If this is about your own order or ticket, please share the email address or order ID "
+            "you used and I'll be happy to help."
+        )
+        if body.conversation_id:
+            save_conversation_message(body.conversation_id, "assistant", denial)
+        event = StreamEvent(
+            type="done",
+            response=denial,
+            data={
+                "entry_agent": "security",
+                "final_agent": "security",
+                "visited_agents": ["security"],
+                "route": [{"from": "security", "action": "blocked_bulk_data_access"}],
+                "intents": ["privacy_violation"],
+                "thread_id": body.thread_id,
+                "conversation_id": body.conversation_id,
+            },
+        )
+        return StreamingResponse(
+            iter([f"data: {event.model_dump_json()}\n\n"]),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     # ---- Persist the user message ----
     if body.conversation_id:
         save_conversation_message(body.conversation_id, "user", body.query)
@@ -509,6 +645,15 @@ async def stream_query(request: Request, body: QueryRequest, _auth: None = Depen
     }
 
     initial_state = _build_initial_state(body, cleaned_message, thread_id)
+
+    # Capture the endpoint's trace so the LangGraph run — which executes
+    # later inside the SSE generator, after this function has returned —
+    # still nests under THIS request's trace instead of becoming a
+    # disconnected root run in LangSmith.
+    try:
+        parent_run = get_current_run_tree()
+    except Exception:
+        parent_run = None
 
     start_time = time.monotonic()
     MAX_GRAPH_SECONDS = 180.0
@@ -582,9 +727,25 @@ async def stream_query(request: Request, body: QueryRequest, _auth: None = Depen
             return StreamEvent(type="error", message=event.get("message", "Unknown error"))
         return None
 
+    def _spawn_graph_task(queue: asyncio.Queue) -> asyncio.Task:
+        """Create the graph task attached to THIS request's LangSmith trace.
+
+        asyncio tasks copy the current contextvars at creation time, so
+        entering the tracing context here (with the explicit parent captured
+        earlier in the endpoint) makes every graph run nest under the request
+        trace even though the generator executes post-response.
+        """
+        ctx = (
+            ls.tracing_context(parent=parent_run)
+            if parent_run is not None
+            else contextlib.nullcontext()
+        )
+        with ctx:
+            return asyncio.create_task(_run_graph_to_queue(queue))
+
     async def event_generator():
         queue: asyncio.Queue = asyncio.Queue()
-        task = asyncio.create_task(_run_graph_to_queue(queue))
+        task = _spawn_graph_task(queue)
         last_heartbeat = time.monotonic()
         graph_started = time.monotonic()
         final_output = None

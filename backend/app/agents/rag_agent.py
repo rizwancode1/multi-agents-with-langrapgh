@@ -154,6 +154,33 @@ def _context_text(docs: list[Document]) -> str:
     return "\n\n".join(doc.page_content for doc in docs)
 
 
+def sanitize_documents(docs: list[Document], source: str) -> list[Document]:
+    """Guard against indirect prompt injection hidden in retrieved documents.
+
+    Retrieved content is untrusted (a poisoned corpus or indexed page can carry
+    instruction-style payloads). Flagged chunks are replaced with a neutral
+    marker before they reach any LLM prompt.
+    """
+    from app.security import security
+
+    sanitized: list[Document] = []
+    for doc in docs:
+        is_safe, reason = security.sanitizer.check(doc.page_content)
+        if not is_safe:
+            logger.warning("rag_doc_injection_blocked", extra={"extra_data": {
+                "source": doc.metadata.get("source", "unknown"),
+                "reason": reason,
+                "stage": source,
+                "preview": doc.page_content[:200],
+            }})
+            doc = Document(
+                page_content="[Content blocked by security scan (potential embedded instructions).]",
+                metadata=doc.metadata,
+            )
+        sanitized.append(doc)
+    return sanitized
+
+
 # === Sub-graph builder ===
 
 # === Routing (module-level & pure for testability) ===
@@ -237,6 +264,7 @@ def build_rag_subgraph():
         def _run():
             question = state.get("rewritten_question") or state["question"]
             docs = state.get("context", [])
+            docs = sanitize_documents(docs, source="rerank")
             reranked = _get_reranker().rerank(question, docs)
             return {"context": reranked}
 

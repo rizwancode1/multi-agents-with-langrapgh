@@ -98,4 +98,5 @@ STATUS_MESSAGES = {
     "return_refund": "Calculating refund eligibility...",
     "evaluator": "Validating response...",
     "formatter": "Finalizing answer...",
+    "out_of_scope": "Checking how I can help...",
 }
