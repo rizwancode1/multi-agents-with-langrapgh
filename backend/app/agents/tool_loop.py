@@ -15,10 +15,29 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import BaseTool
 
 from app.monitoring import get_logger
+from app.security import security
 
 logger = get_logger("tool_loop")
 
 MAX_TOOL_ROUNDS = 4
+
+
+def _scan_tool_result(result_text: str) -> str:
+    """Guard against indirect prompt injection arriving via tool output.
+
+    Tool results are untrusted content (DB fields could contain attacker-
+    controlled text). If they carry instruction-style payloads, replace them
+    before the text is fed back into the LLM conversation.
+    """
+    is_safe, reason = security.sanitizer.check(result_text)
+    if not is_safe:
+        logger.warning("tool_result_injection_blocked", extra={"extra_data": {
+            "reason": reason,
+            "preview": result_text[:200],
+        }})
+        return ('{"error": "Tool output blocked by security scan '
+                '(potential embedded instructions)."}')
+    return result_text
 
 
 def run_tool_loop(
@@ -66,6 +85,7 @@ def run_tool_loop(
                 try:
                     raw_result = selected_tool.invoke(tool_args)
                     result_text = raw_result if isinstance(raw_result, str) else str(raw_result)
+                    result_text = _scan_tool_result(result_text)
                     executed.append({"tool": tool_name, "args": tool_args, "result": result_text})
                     logger.info("tool_call_executed", extra={"extra_data": {
                         "tool": tool_name,

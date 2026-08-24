@@ -1,5 +1,5 @@
 from langchain_core.prompts import ChatPromptTemplate
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.agents.route_utils import add_route
 from app.agents.state import AgentName, AgentState, format_history
@@ -15,6 +15,13 @@ class EvaluationResult(BaseModel):
     grounded: bool
     complete: bool
     hallucination: bool
+    user_action_required: bool = Field(
+        default=False,
+        description=(
+            "True when the correct next step is for the USER to provide "
+            "information (e.g. their email or order ID), so the turn should END."
+        ),
+    )
     unsupported_claims: list[str]
     invalid_citations: list[str]
     missing_information: list[str]
@@ -31,6 +38,7 @@ def _safe_default_evaluation() -> dict:
         "grounded": True,
         "complete": True,
         "hallucination": False,
+        "user_action_required": False,
         "unsupported_claims": [],
         "invalid_citations": [],
         "missing_information": [],
@@ -57,6 +65,10 @@ EVALUATOR_PROMPT = ChatPromptTemplate.from_messages([
         "\n   - account_security: requires retrieved_documents covering security"
         "\n   - support_ticket / complaint: requires a response acknowledging the issue"
         "\n   - return_refund: requires return_refund_data with eligibility and reasoning"
+        "\n4b. AWAITING USER INPUT IS A VALID COMPLETED TURN. If the agent's response is a legitimate request for information ONLY the user can provide"
+        "\n   (e.g. their email address or order ID, required by privacy policy before revealing account data), then set user_action_required=true,"
+        "\n   complete=true, passed=true, recommended_agent=null. Do NOT retry the agent for asking."
+        "\n   Retrying is only for when the agent COULD have answered from the available data but failed to."
         "\n5. HALLUCINATION: Set hallucination=true if ANY claim is made that is not directly supported by the provided data."
         "\n6. FEEDBACK: If the response is incomplete, provide specific, actionable feedback in 'reason' so the next agent attempt can address the gap."
         "\n7. If the agent has already been retried 2+ times for the same issue, consider passing rather than retrying indefinitely."
@@ -68,6 +80,25 @@ EVALUATOR_PROMPT = ChatPromptTemplate.from_messages([
         "Conversation history:\n{history}\n\nUser query:\n{query}\n\nDetected intents:\n{intents}\n\nAgent response:\n{response}\n\nHandoff feedback:\n{handoff_reason}\n\nOrder data:\n{order_data}\n\nOrder ID:\n{order_id}\n\nRetrieved documents:\n{retrieved_documents}\n\nReturn/Refund data:\n{return_refund_data}\n\nContext:\n{context}\n\nRetry count:\n{retry_count}"
     ),
 ])
+
+
+def _looks_like_user_input_request(response: str, state: AgentState) -> bool:
+    """Heuristic fallback for 'the agent asked the user for their identifier'.
+
+    Complements the LLM's user_action_required flag so that even a weak
+    evaluator model can never trap the request in an endless retry loop when
+    the specialist correctly asked for missing info (privacy verification).
+    """
+    if not response or "?" not in response:
+        return False
+    r = response.lower()
+    asks_identifier = "email" in r or "order id" in r or "order-id" in r
+    has_data = bool(
+        state.get("order_data")
+        or state.get("return_refund_data")
+        or state.get("retrieved_documents")
+    )
+    return asks_identifier and not has_data
 
 
 def evaluator_node(state: AgentState):
@@ -108,6 +139,7 @@ def evaluator_node(state: AgentState):
             "grounded": evaluation.get("grounded"),
             "complete": evaluation.get("complete"),
             "hallucination": evaluation.get("hallucination"),
+            "user_action_required": evaluation.get("user_action_required"),
             "recommended_agent": evaluation.get("recommended_agent"),
             "reason": evaluation.get("reason"),
         }})
@@ -120,6 +152,25 @@ def evaluator_node(state: AgentState):
             "error": str(e),
             "evaluation_available": False,
         }})
+
+    # Deterministic override: a clarification question that asks the user for
+    # their own identifier is the CORRECT end of turn — never retry it.
+    awaiting_user_input = evaluation.get("user_action_required", False) or (
+        not evaluation.get("hallucination", False)
+        and _looks_like_user_input_request(state.get("response", ""), state)
+    )
+    if awaiting_user_input and not evaluation.get("passed", True):
+        logger.info("evaluator_awaiting_user_input_override", extra={"extra_data": {
+            "query": query[:200],
+            "original_reason": evaluation.get("reason", ""),
+        }})
+        evaluation.update({
+            "passed": True,
+            "complete": True,
+            "recommended_agent": None,
+            "user_action_required": True,
+            "reason": (evaluation.get("reason") or "") + " [Awaiting user-provided identifier — ending turn.]",
+        })
 
     if not evaluation.get("passed", True):
         evaluation["recommended_agent"] = evaluation.get("recommended_agent") or "policy_rag"

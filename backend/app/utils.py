@@ -71,7 +71,7 @@ def _build_chat_llm(model: str, temperature: float) -> ChatOpenAI:
         api_key=settings.openrouter_api_key or "sk-placeholder",
         model=model,
         temperature=temperature,
-        timeout=60,
+        timeout=45,
         max_retries=0,
         callbacks=[TokenUsageHandler()],
     )

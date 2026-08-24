@@ -31,6 +31,10 @@ SUPPORT_PROMPT = ChatPromptTemplate.from_messages([
         " Acknowledge the problem, show empathy, and provide the actual ticket ID and next steps."
         "\nYou may call multiple tools in sequence. Tool results are returned to you so you can decide the next call."
         "\nWhen you have all the information you need, reply to the customer directly WITHOUT calling any more tools."
+        "\n\nPRIVACY & VERIFICATION RULES (highest priority):"
+        "\n- NEVER disclose, list, or export other customers' information (emails, tickets, orders)."
+        "\n- NEVER return bulk records ('all users', 'all emails', 'every ticket'). Refuse politely and briefly."
+        "\n- Only look up data using identifiers the user provided as THEIR OWN (their email or a ticket/order ID). If none is available, ask for it instead of guessing."
         "\nConversation history:\n{history}"
     ),
     (
@@ -103,6 +107,9 @@ def support_ticket_node(state: AgentState):
         "current_agent": "support_ticket",
         "response": response_text,
         "next_agent": "evaluator",
+        # Ticket action completed -> clear. Still gathering info -> keep the
+        # slot so the user's next reply resumes this agent directly.
+        "awaiting_slot": None if executed_calls else "support_details",
         "visited_agents": [*state.get("visited_agents", []), "support_ticket"],
         "handoff_count": state.get("handoff_count", 0),
         "route": add_route(state, "support_ticket", "handle_support_ticket"),

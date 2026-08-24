@@ -8,7 +8,7 @@ from app.agents.formatter_agent import formatter_node
 from app.agents.order_agent import order_node
 from app.agents.rag_agent import rag_node as policy_rag_node
 from app.agents.return_refund_agent import return_refund_node
-from app.agents.router_agent import router_node
+from app.agents.router_agent import out_of_scope_node, router_node
 from app.agents.state import AgentState
 from app.agents.support_ticket_agent import support_ticket_node
 
@@ -32,6 +32,11 @@ AGENT_CAPABILITIES = {
         "description": "Handles returns, eligibility checks, and refunds",
         "can_handle": ["return_policy", "refund_policy", "return_refund"],
         "can_handoff_to": ["evaluator"],
+    },
+    "out_of_scope": {
+        "description": "Terminal refusal for requests outside the support domain (math, code, essays, trivia, admin actions)",
+        "can_handle": ["out_of_scope"],
+        "can_handoff_to": [],
     },
 }
 
@@ -104,6 +109,7 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None):
     builder.add_node("return_refund", return_refund_node)
     builder.add_node("formatter", formatter_node)
     builder.add_node("evaluator", evaluator_node)
+    builder.add_node("out_of_scope", out_of_scope_node)
 
     builder.add_edge(START, "router")
 
@@ -114,8 +120,11 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None):
             "order": "order",
             "policy_rag": "policy_rag",
             "support_ticket": "support_ticket",
+            "out_of_scope": "out_of_scope",
         },
     )
+
+    builder.add_edge("out_of_scope", END)
 
     builder.add_conditional_edges(
         "order",

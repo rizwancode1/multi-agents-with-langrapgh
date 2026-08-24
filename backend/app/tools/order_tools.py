@@ -121,10 +121,10 @@ def get_orders_by_email(customer_email: str) -> str:
 @tool
 def search_orders(query: str) -> str:
     """
-    Search orders by order ID, customer name, or email. This is the main lookup tool.
+    Search orders by order ID or customer email. This is the main lookup tool.
 
     Args:
-        query: Order ID like ORD-1001, customer name, or email address
+        query: Order ID like ORD-1001, or the customer's email address
 
     Returns:
         JSON string with matching order details
@@ -154,25 +154,19 @@ def search_orders(query: str) -> str:
 
         name_candidates = re.findall(r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)", query)
         if name_candidates:
-            matched_orders = []
-            for candidate in sorted(name_candidates, key=len, reverse=True):
-                orders = db.query(Order).filter(Order.customer_name.ilike(f"%{candidate}%")).all()
-                if orders:
-                    matched_orders.extend(orders)
-            seen = set()
-            unique = []
-            for o in matched_orders:
-                if o.id not in seen:
-                    seen.add(o.id)
-                    unique.append(o)
-            if unique:
-                return str([order_to_dict(o) for o in unique])
-            return str({"error": "No orders found", "query": query})
+            # Privacy: name-only lookups are disabled. Names are not unique
+            # identifiers, so they must never be used to pull customer data.
+            return str({
+                "error": "Identifier required",
+                "message": "For privacy, lookups require the customer's email address or an order ID (ORD-...).",
+            })
 
-        order = db.query(Order).order_by(Order.order_date.desc()).first()
-        if order:
-            return str(order_to_dict(order))
-        return str({"error": "No orders found", "query": query})
+        # Privacy: never fall back to returning arbitrary/recent orders —
+        # that would leak another customer's data.
+        return str({
+            "error": "Identifier required",
+            "message": "Please provide a valid order ID (ORD-...) or the customer's email address.",
+        })
     finally:
         db.close()
 

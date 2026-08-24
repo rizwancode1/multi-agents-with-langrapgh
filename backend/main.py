@@ -17,7 +17,7 @@ if __name__ == "__main__":
         workers = 1
 
     uvicorn.run(
-        "main:app",
+        "app.api:app",
         host=host,
         port=8000,
         reload=reload,

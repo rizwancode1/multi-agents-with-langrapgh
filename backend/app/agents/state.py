@@ -8,6 +8,7 @@ AgentName = Literal[
     "return_refund",
     "evaluator",
     "formatter",
+    "out_of_scope",
 ]
 
 
@@ -35,6 +36,10 @@ class AgentState(TypedDict, total=False):
     relevant_sources: list[str]
     is_grounded: bool | None
     rag_trace: list[str]
+    # Slot-filling: when a specialist asked the user for missing info (e.g.
+    # their email/order ID), the pending slot name persists in the checkpoint
+    # so the next turn can skip routing and resume the right agent directly.
+    awaiting_slot: str | None
 
 
 def format_history(messages: list[dict] | None) -> str:

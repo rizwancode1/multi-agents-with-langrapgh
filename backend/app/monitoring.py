@@ -5,10 +5,35 @@ Production-grade metrics collection and JSON logging.
 
 import json
 import logging
+import re
 import time
 from datetime import UTC, datetime
 
+from langchain_core.callbacks import BaseCallbackHandler
+
 # === Structured JSON Logger ===
+
+# Emails/phones/cards must never reach log aggregation systems in plaintext.
+_PII_REDACTIONS = [
+    (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"), "[EMAIL REDACTED]"),
+    (re.compile(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b"), "[PHONE REDACTED]"),
+    (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[SSN REDACTED]"),
+    (re.compile(r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b"), "[CARD REDACTED]"),
+]
+
+
+def _redact_pii(value):
+    """Recursively redact PII in strings (for log payloads)."""
+    if isinstance(value, str):
+        for pattern, replacement in _PII_REDACTIONS:
+            value = pattern.sub(replacement, value)
+        return value
+    if isinstance(value, dict):
+        return {k: _redact_pii(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_pii(v) for v in value]
+    return value
+
 
 class JSONFormatter(logging.Formatter):
     """Format log records as JSON for log aggregation (ELK, Datadog, etc.)."""
@@ -17,13 +42,13 @@ class JSONFormatter(logging.Formatter):
         log_obj = {
             "timestamp": datetime.now(UTC).isoformat(),
             "level": record.levelname,
-            "message": record.getMessage(),
+            "message": _redact_pii(record.getMessage()),
             "module": record.module,
             "function": record.funcName,
         }
         # Merge any extra data attached to the record
         if hasattr(record, "extra_data"):
-            log_obj.update(record.extra_data)
+            log_obj.update(_redact_pii(record.extra_data))
         return json.dumps(log_obj)
 
 def get_logger(name: str = "production-api") -> logging.Logger:
@@ -135,7 +160,7 @@ def set_metrics(collector: MetricsCollector) -> None:
     _metrics = collector
 
 
-class TokenUsageHandler:
+class TokenUsageHandler(BaseCallbackHandler):
     """
     LangChain callback handler that accumulates REAL provider-reported token
     usage into the shared MetricsCollector instead of word-count estimates.

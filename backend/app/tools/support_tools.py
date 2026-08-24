@@ -53,6 +53,32 @@ def create_support_ticket(customer_name: str, customer_email: str, subject: str,
     """
     db = _get_db()
     try:
+        # Idempotency window: if an identical ticket for this customer was
+        # created very recently (double-click / client retry), return the
+        # existing one instead of creating a duplicate.
+        from datetime import UTC, datetime, timedelta
+
+        window_start = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=10)
+        recent = (
+            db.query(SupportTicket)
+            .filter(
+                SupportTicket.customer_email == customer_email.strip().lower(),
+                SupportTicket.subject == subject.strip(),
+                SupportTicket.description == description.strip(),
+                SupportTicket.created_at >= window_start,
+            )
+            .order_by(SupportTicket.created_at.desc())
+            .first()
+        )
+        if recent:
+            result = ticket_to_dict(recent)
+            result["message"] = (
+                f"Support ticket {recent.ticket_id} already exists for this request "
+                f"(created moments ago). No duplicate was created."
+            )
+            result["duplicate_prevented"] = True
+            return str(result)
+
         ticket = SupportTicket(
             ticket_id=_generate_ticket_id(),
             customer_name=customer_name,
