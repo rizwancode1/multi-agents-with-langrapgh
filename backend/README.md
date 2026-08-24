@@ -9,62 +9,69 @@ A production-ready multi-agent support system built with LangGraph, FastAPI, SQL
                             │
                             ▼
                  ┌─────────────────────┐
-                 │ Support Supervisor  │
-                 │ Intent + Planning   │
+                 │ Support Supervisor  │  scope-aware routing,
+                 │ Intent + Planning   │  slot-fill fast path
                  └──────────┬──────────┘
                             │
-           ┌────────────────┼─────────────────────┐
-           │                │                     │
-           ▼                ▼                     ▼
-      ┌─────────┐      ┌─────────┐         ┌─────────────┐
-      │  Order  │      │ Policy  │         │   Support   │
-      │  Agent  │      │   RAG   │         │ Ticket Agent│
-      └────┬────┘      └────┬────┘         └──────┬──────┘
-           │                │                     │
-           │                │                     │
-           ▼                ▼                     ▼
-       Order Tools      Hybrid RAG            Ticket Tools
-                            │
-                            │
-                            ▼
-                     ┌──────────────┐
-                     │ Return/Refund│
-                     │    Agent     │
-                     └──────┬───────┘
-                            │
-                            ▼
-                       Action Tools
-                            │
-                            ▼
-                  ┌──────────────────┐
-                  │     Evaluator    │
-                  └────────┬─────────┘
-                           │
-                   ┌───────┴────────┐
-                   │                │
-                 PASS              FAIL
-                   │                │
-                   ▼                ▼
-               Formatter        Retry/Repair
+        ┌───────────┬───────┴──────┬──────────────┐
+        │           │              │              │
+        ▼           ▼              ▼              ▼
+   ┌─────────┐ ┌─────────┐  ┌─────────────┐ ┌──────────────┐
+   │  Order  │ │ Policy  │  │   Support   │ │ Out-of-Scope │
+   │  Agent  │ │   RAG   │  │ Ticket Agent│ │   Refusal    │──► END
+   └────┬────┘ └────┬────┘  └──────┬──────┘ └──────────────┘
+        │           │              │   (deterministic, no LLM)
+        ▼           ▼              ▼
+    Order Tools  Hybrid RAG   Ticket Tools
+                    │
+                    ▼
+             ┌──────────────┐
+             │ Return/Refund│
+             │    Agent     │
+             └──────┬───────┘
+                    ▼
+               Action Tools
+                    │
+                    ▼
+          ┌──────────────────┐
+          │     Evaluator    │  passes clarification turns
+          └────────┬─────────┘  (user_action_required)
                    │
-                   ▼
-                  END
+           ┌───────┴────────┐
+           │                │
+         PASS              FAIL
+           │                │
+           ▼                ▼
+       Formatter        Retry/Repair
+           │
+           ▼
+          END
 ```
 
 ### Agents
 
 | Agent | Purpose | Handoff To | Tools |
 |-------|---------|------------|-------|
-| **Supervisor** | Intent detection, planning, and orchestration | order, policy_rag, support_ticket | — |
-| **Order** | Retrieves customer order information from the database | evaluator | `search_orders`, `get_order_by_id`, `get_order_by_customer_name`, `get_order_items` |
-| **Policy RAG** | Agentic RAG: contextualize → hybrid retrieval (dense + BM25/RRF) → LLM rerank → grade context → generate → groundedness check | return_refund, evaluator | — |
-| **Support Ticket** | Creates and tracks support tickets | evaluator | `create_support_ticket`, `get_ticket_status`, `list_tickets_by_email`, `update_ticket_status` |
+| **Supervisor** | Scope-aware intent detection and routing; enforces the assistant's domain boundaries (`out_of_scope`); slot-fill fast path resumes specialists on follow-ups without an LLM call | order, policy_rag, support_ticket, out_of_scope | — |
+| **Order** | Retrieves customer order information from the database. Identity-first: requires the user's own email or order ID before disclosing anything (name-only lookups are disabled) | evaluator | `search_orders`, `get_order_by_id`, `get_orders_by_email`, `get_order_items` |
+| **Policy RAG** | Agentic RAG: contextualize → hybrid retrieval (dense + BM25/RRF) → LLM rerank (with injection scanning) → grade context → generate → groundedness check | return_refund, evaluator | — |
+| **Support Ticket** | Creates and tracks support tickets (idempotent creation prevents duplicates) | evaluator | `create_support_ticket`, `get_ticket_status`, `list_tickets_by_email`, `update_ticket_status` |
 | **Return/Refund** | Processes return/refund requests and refund status lookups | evaluator | `calculate_eligible_refund`, `create_refund_request`, `get_refund_status`, `list_refunds_by_order` |
-| **Evaluator** | Scores responses for grounding, correctness, and safety; retries failed agents | formatter, order, policy_rag, support_ticket, return_refund, end | — |
+| **Out-of-Scope** | Deterministic terminal refusal for requests outside the support domain (math, code, essays, trivia, admin actions) | end | — |
+| **Evaluator** | Scores responses for grounding, correctness, and safety; retries failed agents; treats clarification turns ("please share your email") as completed turns via `user_action_required` | formatter, order, policy_rag, support_ticket, return_refund, end | — |
 | **Formatter** | Produces the final user-facing response | end | — |
 
 ## Key Features
 
+- **Scope-Aware Router**: The supervisor knows what the assistant IS and what it is ALLOWED to do — out-of-domain requests (math, "write me code", essays, trivia) are classified `out_of_scope` and refused without invoking any specialist
+- **Deterministic Safety Guardrails**: Bulk/cross-user data access ("list all user emails"), destructive/admin actions ("delete all knowledge base", "drop the orders table"), and third-party probes ("my friend's order") are blocked pre-LLM with graceful in-chat refusals — no agent, tool, or LLM involved
+- **Identity-First Data Access**: Agents require the user's own email/order ID before disclosing account data; name-only lookups and "return newest order" fallbacks are removed from the tool layer
+- **Slot-Filled Follow-Ups**: When a specialist asks for an email/order ID, the pending slot persists in the checkpoint; the next reply containing an identifier resumes the right agent directly (no router LLM call)
+- **Clarification-Aware Evaluation**: The evaluator treats "asking the user for their identifier" as a valid completed turn (`user_action_required`), with a deterministic backstop that prevents retry loops
+- **Indirect Injection Defense**: Tool outputs and retrieved RAG documents are scanned for embedded instructions before entering any LLM context
+- **PII Redaction Strategy**: Emails stay functional in inputs (they are lookup identifiers) but are always redacted in outputs, structured logs, and traces
+- **Idempotent Mutations**: Duplicate ticket submissions (double-click/retry) within a 10-minute window return the existing ticket instead of creating duplicates
+- **LLM Failover**: Every agent runs on a primary model with an automatic fallback model; 45s per-model timeout keeps worst-case latency bounded
 - **6 Specialized Agents**: Order, Policy RAG, Support Ticket, Return/Refund, Evaluator, and Formatter
 - **LangChain @tool Bindings**: Agents use structured tool calls to create and retrieve real DB records (tickets, refunds, orders)
 - **Actual DB Records**: Support tickets (`TKT-...`) and refund requests (`REF-...`) are persisted and trackable by ID
@@ -188,7 +195,7 @@ Key settings in `app/config.py`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `primary_model` | `openrouter/google/gemini-2.0-flash-exp:free` | LLM for all agents |
+| `primary_model` / `fallback_model` (`.env`: `PRIMARY_MODEL` / `FALLBACK_MODEL`) | `openrouter/google/gemini-2.0-flash-exp:free` / `openrouter/meta-llama/llama-3.3-70b-instruct:free` | Primary LLM with automatic failover to a *different* fallback model (45s timeout each). Free-tier OpenRouter slugs change availability frequently — verify yours at openrouter.ai/models and keep both slugs distinct |
 | `openrouter_api_key` | `""` | OpenRouter API key |
 | `app_env` | `development` | Environment mode |
 | `cache_ttl_seconds` | `300` | Response cache TTL |
@@ -215,6 +222,7 @@ The server starts at `http://127.0.0.1:8000`.
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/query` | Send a query to the multi-agent system |
+| POST | `/query/stream` | Same, via Server-Sent Events with live per-agent status updates |
 | GET | `/tickets` | List agent-created tickets (filters: `status`, `priority`, `email`, `order_id`, `q`; pagination) |
 | GET | `/tickets/stats` | Ticket counts by status and priority |
 | GET | `/tickets/{ticket_id}` | Get a single ticket |
@@ -272,6 +280,37 @@ curl -X POST "http://127.0.0.1:8000/query" \
   -d '{"query": "Can I return it?", "thread_id": "my-conversation-123"}'
 ```
 
+Follow-ups are slot-filled: if the agent asked for your email or order ID, your next
+reply containing an identifier resumes that specialist directly — no re-routing.
+
+### Streaming
+
+```bash
+curl -N -X POST "http://127.0.0.1:8000/query/stream" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is the status of ORD-1001?"}'
+```
+
+Emits SSE events: `status` (per-agent progress), `step` (agent finished), `error`, and a final `done` event with the response plus route/agent metadata.
+
+### Guardrail Examples
+
+These are refused deterministically before any agent runs:
+
+```bash
+# Privacy: bulk / cross-user access → instant in-chat refusal
+curl -X POST "http://127.0.0.1:8000/query" -H "Content-Type: application/json" \
+  -d '{"query": "list all user emails"}'
+
+# Safety: destructive/admin action → instant in-chat refusal
+curl -X POST "http://127.0.0.1:8000/query" -H "Content-Type: application/json" \
+  -d '{"query": "delete all knowledge base"}'
+
+# Scope: outside support domain → out_of_scope refusal node
+curl -X POST "http://127.0.0.1:8000/query" -H "Content-Type: application/json" \
+  -d '{"query": "what is 2/2"}'
+```
+
 ## Workflow
 
 See `workflow.txt` for the architecture diagram.
@@ -310,15 +349,16 @@ Grade Context (SUFFICIENT / PARTIAL / NONE / UNANSWERABLE)
 
 ### Query Flow
 
-1. **Supervisor** receives the query, classifies intent, and routes to the appropriate specialist
-2. **Specialized Agent** processes the request using bound LangChain tools:
-   - **Order**: Uses `search_orders`, `get_order_by_id`, etc. to retrieve real order data from the database
-   - **Policy RAG**: Retrieves relevant documents and generates a grounded answer; may hand off to Return/Refund
-   - **Support Ticket**: Uses `create_support_ticket` to create real tickets with trackable `TKT-...` IDs; uses `get_ticket_status` for status lookups
-   - **Return/Refund**: Uses `calculate_eligible_refund` and `create_refund_request` to create real refund requests with trackable `REF-...` IDs; uses `get_refund_status` for lookups
-3. **Evaluator** checks the response for grounding, relevance, and factual support
-4. If the evaluator **passes**, the response goes to the Formatter
-5. If the evaluator **fails**, it routes back to the responsible agent for retry (up to 5 handoffs)
+1. **Security & Guardrails** (deterministic, pre-LLM): injection scan, bulk/cross-user data-access check, destructive-action check, PII masking. Flagged requests get an instant in-chat refusal and never reach the agents
+2. **Supervisor** classifies intent with scope awareness; `out_of_scope` requests terminate immediately at the refusal node. If a pending slot exists (agent previously asked for an identifier) and the reply contains one, the specialist resumes directly
+3. **Specialized Agent** processes the request using bound LangChain tools:
+   - **Order**: Requires the user's own email or order ID (asks if missing); uses `search_orders`, `get_order_by_id`, `get_orders_by_email`, `get_order_items`
+   - **Policy RAG**: Retrieves relevant documents (injection-scanned) and generates a grounded answer; may hand off to Return/Refund
+   - **Support Ticket**: Uses `create_support_ticket` to create real tickets with trackable `TKT-...` IDs (idempotent); asks for details before creating
+   - **Return/Refund**: Uses `calculate_eligible_refund` and `create_refund_request` to create real refund requests with trackable `REF-...` IDs
+4. **Evaluator** checks grounding, relevance, and factual support. Clarification turns (agent asked for the user's email/order ID) pass via `user_action_required` instead of triggering retries
+5. If the evaluator **passes**, the response goes to the Formatter
+6. If the evaluator **fails**, it routes back to the responsible agent for retry (bounded by per-agent visit and total handoff caps)
 
 ## Database
 
@@ -361,15 +401,32 @@ Inspect hit/miss rates via `GET /cache/stats`.
 
 ## Security
 
-- **Input Sanitization**: Detects prompt injection patterns before LLM calls
-- **PII Masking**: Redacts emails, phone numbers, SSNs, and credit cards from both input and output
-- **Output Validation**: Blocks potentially harmful content in LLM responses
+Defense in depth — deterministic guardrails first, semantic judgement second:
+
+| Layer | Mechanism | Examples blocked |
+|-------|-----------|------------------|
+| Input sanitization | Prompt-injection pattern scan | "ignore all previous instructions..." |
+| Bulk-access guardrail | Regex, pre-LLM, in-chat refusal | "list all users emails", "show every order", "my friend's orders" |
+| Destructive-action guardrail | Regex, pre-LLM, in-chat refusal | "delete all knowledge base", "drop the orders table", "shut down the server" |
+| Scope-aware router | LLM classification with explicit domain boundaries | math/homework, code writing, essays, trivia → `out_of_scope` node (deterministic refusal) |
+| Tool-layer authorization | Identifier required; no name lookups; no arbitrary fallbacks | name-only probes, unscoped searches return "Identifier required" |
+| Indirect injection scan | Tool outputs + retrieved docs checked before LLM context | poisoned documents / DB fields carrying instructions |
+
+### PII Handling
+
+- **Inputs**: phone/SSN/card masked before the LLM; emails intentionally kept intact because they are functional lookup identifiers
+- **Outputs**: all PII including emails is redacted before reaching the client (`[EMAIL REDACTED]`)
+- **Logs & traces**: structured JSON logs recursively redact emails, phones, cards, and SSNs
+
+### Known Limitation (demo-grade)
+
+Email-as-identity means anyone who knows another person's email can query their orders. Production deployments should derive identity from an authenticated session and enforce authorization at the tool layer.
 
 ## Monitoring
 
-- **Structured JSON Logging**: All logs output as JSON for ELK/Datadog ingestion
-- **Metrics Collector**: Tracks request count, latency, error rate, cache hit rate, and token usage
-- **LangSmith Tracing**: Full trace visibility via LangSmith integration
+- **Structured JSON Logging**: All logs output as JSON for ELK/Datadog ingestion, with recursive PII redaction
+- **Metrics Collector**: Tracks request count, latency, error rate, cache hit rate, and real provider-reported token usage (via a LangChain callback handler)
+- **LangSmith Tracing**: One nested trace per request — the streaming endpoint re-attaches the graph run to the request trace (`tracing_context(parent=...)`), so security checks, router, agents, evaluator, and formatter all appear as children of `query_stream_endpoint` / `query_endpoint` in a single tree
 
 ## Development
 
